@@ -821,6 +821,9 @@ Be specific — mention actual amounts and merchants from the data.
                 highest_tx = amount
                 highest_tx_date = str(tx.get("date", ""))
 
+        # ─── ADD: Extended transaction metrics ─────────────────────────────────
+        detailed_metrics = self._extract_detailed_transaction_metrics(transactions)
+
         net_cash_flow = total_income - total_expenses
         avg_balance = mean(balances) if balances else 0.0
         savings_rate = (net_cash_flow / total_income * 100) if total_income > 0 else 0.0
@@ -960,7 +963,373 @@ Be specific — mention actual amounts and merchants from the data.
             "income_analysis": income_analysis,
             "top_depositors": top_depositors,
             "top_creditors": top_creditors,
+            # ─── NEW: Extended metrics ──────────────────────────────────────────
+            "detailed_transaction_metrics": detailed_metrics,
         }
+
+    # ─── Detailed Transaction Metrics Extraction ──────────────────────────────
+    def _extract_detailed_transaction_metrics(self, transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Extract detailed transaction metrics based on specific patterns in the description column.
+        Returns comprehensive analysis including top transactions, cumulative sums, and merchant breakdowns.
+        """
+        results = {}
+        
+        # ─── 1. Top 10 Paid In (Income) Transactions ──────────────────────────
+        income_txs = [t for t in transactions if t.get("type") == "income"]
+        top_paid_in = sorted(income_txs, key=lambda x: x.get("amount", 0), reverse=True)[:10]
+        results["top_10_paid_in"] = [
+            {
+                "receipt": tx.get("receipt", ""),
+                "date": tx.get("date", ""),
+                "description": tx.get("description", "")[:80],
+                "amount": tx.get("amount", 0),
+                "phone": tx.get("phone", "")
+            }
+            for tx in top_paid_in
+        ]
+        results["top_10_paid_in_sum"] = sum(tx.get("amount", 0) for tx in top_paid_in)
+        
+        # ─── 2. Top 10 Withdrawals (Expense) Transactions ──────────────────────
+        expense_txs = [t for t in transactions if t.get("type") == "expense"]
+        top_withdrawals = sorted(expense_txs, key=lambda x: x.get("amount", 0), reverse=True)[:10]
+        results["top_10_withdrawals"] = [
+            {
+                "receipt": tx.get("receipt", ""),
+                "date": tx.get("date", ""),
+                "description": tx.get("description", "")[:80],
+                "amount": tx.get("amount", 0),
+            }
+            for tx in top_withdrawals
+        ]
+        results["top_10_withdrawals_sum"] = sum(tx.get("amount", 0) for tx in top_withdrawals)
+        
+        # ─── 3. PayBill Payments (Pay Bill to / Pay Bill Online to) ──────────
+        paybill_txs = [
+            t for t in transactions 
+            if "Pay Bill to" in t.get("description", "") or "Pay Bill Online to" in t.get("description", "")
+        ]
+        results["paybill_total"] = sum(t.get("amount", 0) for t in paybill_txs)
+        results["paybill_count"] = len(paybill_txs)
+        
+        # Get PayBill numbers and amounts
+        paybill_details = {}
+        for tx in paybill_txs:
+            desc = tx.get("description", "")
+            # Extract PayBill number (typically 6-7 digits after "to")
+            match = re.search(r'to (\d{4,7})', desc)
+            if match:
+                paybill_id = match.group(1)
+                if paybill_id not in paybill_details:
+                    paybill_details[paybill_id] = {"count": 0, "total": 0, "description": desc}
+                paybill_details[paybill_id]["count"] += 1
+                paybill_details[paybill_id]["total"] += tx.get("amount", 0)
+        
+        results["paybill_breakdown"] = [
+            {"paybill": k, "total": v["total"], "count": v["count"], "sample": v["description"][:60]}
+            for k, v in sorted(paybill_details.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]  # Top 10 PayBills
+        
+        # ─── 4. Transfer Charges (Customer Transfer of Funds Charge) ──────────
+        transfer_charges = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Customer Transfer of Funds Charge")
+        ]
+        results["total_transfer_charges"] = sum(t.get("amount", 0) for t in transfer_charges)
+        results["transfer_charge_count"] = len(transfer_charges)
+        
+        # ─── 5. Money Sent to Individuals (Customer Transfer to) ──────────────
+        individual_transfers = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Customer Transfer to")
+        ]
+        results["total_sent_to_individuals"] = sum(t.get("amount", 0) for t in individual_transfers)
+        results["individual_transfer_count"] = len(individual_transfers)
+        
+        # Top 10 individuals receiving money
+        recipient_totals = {}
+        for tx in individual_transfers:
+            desc = tx.get("description", "")
+            # Extract phone number or name
+            phone_match = re.search(r'07\d{8}|2547\d{8}', desc)
+            recipient = phone_match.group() if phone_match else desc[20:40].strip()
+            
+            if recipient not in recipient_totals:
+                recipient_totals[recipient] = {"count": 0, "total": 0, "sample": desc}
+            recipient_totals[recipient]["count"] += 1
+            recipient_totals[recipient]["total"] += tx.get("amount", 0)
+        
+        results["top_10_individual_recipients"] = [
+            {"recipient": k, "total": v["total"], "count": v["count"]}
+            for k, v in sorted(recipient_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]
+        
+        # ─── 6. Customer Payment to Small Business (Pochi La Biashara) ────────
+        small_business = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Customer Payment to Small Business to")
+        ]
+        results["total_pochi_la_biashara"] = sum(t.get("amount", 0) for t in small_business)
+        results["pochi_la_biashara_count"] = len(small_business)
+        
+        # Top 10 small businesses
+        business_totals = {}
+        for tx in small_business:
+            desc = tx.get("description", "")
+            # Extract business name or till number
+            match = re.search(r'to (.+?)(?:\s+at|\s+on|\s*$)', desc[40:])
+            business = match.group(1).strip()[:30] if match else desc[40:60].strip()
+            
+            if business not in business_totals:
+                business_totals[business] = {"count": 0, "total": 0}
+            business_totals[business]["count"] += 1
+            business_totals[business]["total"] += tx.get("amount", 0)
+        
+        results["top_10_small_businesses"] = [
+            {"business": k, "total": v["total"], "count": v["count"]}
+            for k, v in sorted(business_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]
+        
+        # ─── 7. Till/Merchant Payments (Merchant Payment to) ──────────────────
+        till_payments = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Merchant Payment to")
+        ]
+        results["total_till_payments"] = sum(t.get("amount", 0) for t in till_payments)
+        results["till_payment_count"] = len(till_payments)
+        
+        # Top 10 tills
+        till_totals = {}
+        for tx in till_payments:
+            desc = tx.get("description", "")
+            match = re.search(r'to (\d{4,7})', desc)
+            till_number = match.group(1) if match else desc[18:30].strip()
+            
+            if till_number not in till_totals:
+                till_totals[till_number] = {"count": 0, "total": 0, "sample": desc}
+            till_totals[till_number]["count"] += 1
+            till_totals[till_number]["total"] += tx.get("amount", 0)
+        
+        results["top_10_tills"] = [
+            {"till_number": k, "total": v["total"], "count": v["count"]}
+            for k, v in sorted(till_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]
+        
+        # ─── 8. Merchant Charges (Pay Merchant Charge) ─────────────────────────
+        merchant_charges = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Pay Merchant Charge")
+        ]
+        results["total_merchant_charges"] = sum(t.get("amount", 0) for t in merchant_charges)
+        results["merchant_charge_count"] = len(merchant_charges)
+        
+        # Top 10 merchants (extract from description)
+        merchant_totals = {}
+        for tx in merchant_charges:
+            desc = tx.get("description", "")
+            # Extract merchant name after "to"
+            match = re.search(r'to (.+?)(?:\s+at|\s+for|\s*$)', desc)
+            merchant = match.group(1).strip()[:30] if match else desc[20:50].strip()
+            
+            if merchant not in merchant_totals:
+                merchant_totals[merchant] = {"count": 0, "total": 0}
+            merchant_totals[merchant]["count"] += 1
+            merchant_totals[merchant]["total"] += tx.get("amount", 0)
+        
+        results["top_10_merchant_charges"] = [
+            {"merchant": k, "total": v["total"], "count": v["count"]}
+            for k, v in sorted(merchant_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]
+        
+        # ─── 9. Agent Withdrawals (Customer Withdrawal At Agent Till) ─────────
+        agent_withdrawals = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Customer Withdrawal At Agent Till")
+        ]
+        results["total_agent_withdrawals"] = sum(t.get("amount", 0) for t in agent_withdrawals)
+        results["agent_withdrawal_count"] = len(agent_withdrawals)
+        
+        # Top 10 agent locations
+        agent_totals = {}
+        for tx in agent_withdrawals:
+            desc = tx.get("description", "")
+            # Extract agent name/location after "Till"
+            match = re.search(r'Till\s+(\w+)', desc)
+            agent = match.group(1) if match else desc[40:60].strip()
+            
+            if agent not in agent_totals:
+                agent_totals[agent] = {"count": 0, "total": 0}
+            agent_totals[agent]["count"] += 1
+            agent_totals[agent]["total"] += tx.get("amount", 0)
+        
+        results["top_10_agent_locations"] = [
+            {"agent_location": k, "total": v["total"], "count": v["count"]}
+            for k, v in sorted(agent_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]
+        
+        # ─── 10. Agent Deposits (Deposit of Funds at Agent Till) ──────────────
+        agent_deposits = [
+            t for t in transactions 
+            if t.get("description", "").startswith("Deposit of Funds at Agent Till")
+        ]
+        results["total_agent_deposits"] = sum(t.get("amount", 0) for t in agent_deposits)
+        results["agent_deposit_count"] = len(agent_deposits)
+        
+        # Top 10 depositing locations
+        deposit_totals = {}
+        for tx in agent_deposits:
+            desc = tx.get("description", "")
+            match = re.search(r'Till\s+(\w+)', desc)
+            location = match.group(1) if match else desc[35:55].strip()
+            
+            if location not in deposit_totals:
+                deposit_totals[location] = {"count": 0, "total": 0}
+            deposit_totals[location]["count"] += 1
+            deposit_totals[location]["total"] += tx.get("amount", 0)
+        
+        results["top_10_deposit_locations"] = [
+            {"location": k, "total": v["total"], "count": v["count"]}
+            for k, v in sorted(deposit_totals.items(), key=lambda x: x[1]["total"], reverse=True)
+        ][:10]
+        
+        # ─── 11. Fuliza Analysis ────────────────────────────────────────────────
+        fuliza_drawdowns = [
+            t for t in transactions 
+            if t.get("description", "").startswith("OverDraft of Credit Party")
+        ]
+        results["total_fuliza_drawn"] = sum(t.get("amount", 0) for t in fuliza_drawdowns)
+        results["fuliza_count"] = len(fuliza_drawdowns)
+        
+        fuliza_repayments = [
+            t for t in transactions 
+            if t.get("description", "").startswith("OD Loan Repayment to")
+        ]
+        results["total_fuliza_repaid"] = sum(t.get("amount", 0) for t in fuliza_repayments)
+        results["fuliza_repayment_count"] = len(fuliza_repayments)
+        
+        # Calculate Fuliza utilization
+        results["fuliza_utilization_rate"] = (
+            results["total_fuliza_drawn"] / results["total_fuliza_repaid"] * 100
+            if results["total_fuliza_repaid"] > 0 else 0
+        )
+        
+        # ─── 12. Top 10 Transactions by Amount (Overall) ──────────────────────
+        all_txs_sorted = sorted(transactions, key=lambda x: x.get("amount", 0), reverse=True)
+        results["top_10_transactions_by_amount"] = [
+            {
+                "receipt": tx.get("receipt", ""),
+                "date": tx.get("date", ""),
+                "description": tx.get("description", "")[:80],
+                "amount": tx.get("amount", 0),
+                "type": tx.get("type", ""),
+            }
+            for tx in all_txs_sorted[:10]
+        ]
+        
+        # ─── 13. Top Customers by Total Amount (Unique per customer) ──────────
+        customer_totals = {}
+        for tx in transactions:
+            # Try to get customer identifier
+            customer = tx.get("phone", "")
+            if not customer:
+                desc = tx.get("description", "")
+                phone_match = re.search(r'07\d{8}|2547\d{8}', desc)
+                if phone_match:
+                    customer = phone_match.group()
+                else:
+                    # Try to extract name or other identifier
+                    if "Customer Transfer from" in desc:
+                        match = re.search(r'from (.+?)(?:\s+on|\s+at|\s*$)', desc)
+                        customer = match.group(1).strip()[:20] if match else desc[20:40].strip()
+                    elif "Customer Transfer to" in desc:
+                        match = re.search(r'to (.+?)(?:\s+on|\s+at|\s*$)', desc)
+                        customer = match.group(1).strip()[:20] if match else desc[18:38].strip()
+                    else:
+                        customer = desc[:20].strip()
+            
+            if customer not in customer_totals:
+                customer_totals[customer] = {
+                    "total_in": 0,
+                    "total_out": 0,
+                    "count_in": 0,
+                    "count_out": 0,
+                    "net": 0
+                }
+            
+            amount = tx.get("amount", 0)
+            if tx.get("type") == "income":
+                customer_totals[customer]["total_in"] += amount
+                customer_totals[customer]["count_in"] += 1
+            else:
+                customer_totals[customer]["total_out"] += amount
+                customer_totals[customer]["count_out"] += 1
+            customer_totals[customer]["net"] = (
+                customer_totals[customer]["total_in"] - 
+                customer_totals[customer]["total_out"]
+            )
+        
+        results["top_customers_by_transaction_amount"] = [
+            {
+                "customer": k,
+                "total_received": v["total_in"],
+                "total_sent": v["total_out"],
+                "net": v["net"],
+                "transactions": v["count_in"] + v["count_out"]
+            }
+            for k, v in sorted(
+                customer_totals.items(),
+                key=lambda x: x[1]["total_in"] + x[1]["total_out"],
+                reverse=True
+            )
+        ][:10]
+        
+        # ─── 14. Monthly Summary ──────────────────────────────────────────────
+        monthly_data = {}
+        for tx in transactions:
+            date_str = tx.get("date", "")
+            if date_str:
+                month_key = date_str[:7]  # YYYY-MM
+                if month_key not in monthly_data:
+                    monthly_data[month_key] = {
+                        "income": 0,
+                        "expenses": 0,
+                        "count": 0,
+                        "fuliza": 0,
+                        "paybill": 0,
+                        "agent_withdrawal": 0,
+                        "agent_deposit": 0,
+                    }
+                
+                monthly_data[month_key]["income"] += tx.get("amount", 0) if tx.get("type") == "income" else 0
+                monthly_data[month_key]["expenses"] += tx.get("amount", 0) if tx.get("type") == "expense" else 0
+                monthly_data[month_key]["count"] += 1
+                
+                desc = tx.get("description", "")
+                if "OverDraft" in desc:
+                    monthly_data[month_key]["fuliza"] += tx.get("amount", 0)
+                if "Pay Bill" in desc:
+                    monthly_data[month_key]["paybill"] += tx.get("amount", 0)
+                if "Withdrawal At Agent" in desc:
+                    monthly_data[month_key]["agent_withdrawal"] += tx.get("amount", 0)
+                if "Deposit of Funds at Agent" in desc:
+                    monthly_data[month_key]["agent_deposit"] += tx.get("amount", 0)
+        
+        results["monthly_summary"] = [
+            {
+                "month": k,
+                "income": v["income"],
+                "expenses": v["expenses"],
+                "net": v["income"] - v["expenses"],
+                "transactions": v["count"],
+                "fuliza": v["fuliza"],
+                "paybill": v["paybill"],
+                "agent_withdrawal": v["agent_withdrawal"],
+                "agent_deposit": v["agent_deposit"],
+            }
+            for k, v in sorted(monthly_data.items())
+        ]
+        
+        return results
 
     # ─── Classification ───────────────────────────────────────────────────────
     def _classify_transaction(self, tx: Dict[str, Any]) -> Dict[str, str]:
@@ -1446,4 +1815,43 @@ Be specific — mention actual amounts and merchants from the data.
             "statement_type": "unknown",
             "fuliza_cycles": {"cycle_count": 0, "same_day_repayment_rate": 0},
             "income_analysis": {"loan_disbursement_warning": False},
+            "top_depositors": [],
+            "top_creditors": [],
+            "detailed_transaction_metrics": {
+                "top_10_paid_in": [],
+                "top_10_paid_in_sum": 0,
+                "top_10_withdrawals": [],
+                "top_10_withdrawals_sum": 0,
+                "paybill_total": 0,
+                "paybill_count": 0,
+                "paybill_breakdown": [],
+                "total_transfer_charges": 0,
+                "transfer_charge_count": 0,
+                "total_sent_to_individuals": 0,
+                "individual_transfer_count": 0,
+                "top_10_individual_recipients": [],
+                "total_pochi_la_biashara": 0,
+                "pochi_la_biashara_count": 0,
+                "top_10_small_businesses": [],
+                "total_till_payments": 0,
+                "till_payment_count": 0,
+                "top_10_tills": [],
+                "total_merchant_charges": 0,
+                "merchant_charge_count": 0,
+                "top_10_merchant_charges": [],
+                "total_agent_withdrawals": 0,
+                "agent_withdrawal_count": 0,
+                "top_10_agent_locations": [],
+                "total_agent_deposits": 0,
+                "agent_deposit_count": 0,
+                "top_10_deposit_locations": [],
+                "total_fuliza_drawn": 0,
+                "fuliza_count": 0,
+                "total_fuliza_repaid": 0,
+                "fuliza_repayment_count": 0,
+                "fuliza_utilization_rate": 0,
+                "top_10_transactions_by_amount": [],
+                "top_customers_by_transaction_amount": [],
+                "monthly_summary": [],
+            },
         }
