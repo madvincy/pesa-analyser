@@ -1,0 +1,13 @@
+{
+  "include": ["app"],
+  "exclude": ["venv", "**/__pycache__", "tests"],
+  "typeCheckingMode": "basic",
+  "reportUnknownMemberType": "warning",
+  "reportUnknownVariableType": "warning",
+  "reportUnknownParameterType": "warning",
+  "reportUnusedVariable": "warning",
+  "reportUnusedImport": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "pythonVersion": "3.14"
+}

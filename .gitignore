@@ -1,0 +1,57 @@
+
+Dependencies
+node_modules/
+venv/
+env/
+.venv/
+.python-version
+pycache/
+*.pyc
+
+Build outputs
+dist/
+build/
+.next/
+.vercel
+*.log
+
+Environment files
+.env
+.env.local
+.env.*.local
+
+IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+OS files
+.DS_Store
+Thumbs.db
+
+Uploads and reports
+uploads/
+reports/
+logs/
+temp/
+
+Database
+*.db
+*.sqlite
+
+Docker
+*.pid
+*.sock
+
+Testing
+coverage/
+.pytest_cache/
+*.cover
+.eslintcache
+
+Security
+*.pem
+*.key
+*.cert
+*.crt

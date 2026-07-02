@@ -1,0 +1,188 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  role          String    @default("user")
+  isActive      Boolean   @default(true)
+  lastLogin     DateTime?
+
+  // Relations - all reverse relations defined here
+  accounts      Account[]
+  sessions      Session[]
+  analyses      Analysis[]
+  chatHistory   ChatHistory[]
+  passwordReset PasswordReset[]
+  notifications Notification[]
+  payments      Payment[] // <-- Added reverse relation for Payment
+  tokenUsage    TokenUsage[] // <-- Added reverse relation for TokenUsage
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expires   DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Analysis {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fileName          String
+  fileSize          Int
+  fileType          String
+  statementType     String?
+  totalIncome       Float    @default(0)
+  totalExpenses     Float    @default(0)
+  netCashFlow       Float    @default(0)
+  averageBalance    Float    @default(0)
+  totalFees         Float    @default(0)
+  totalTransactions Int      @default(0)
+  monthlyData       Json
+  categoryData      Json
+  trendData         Json
+  insights          Json
+  warnings          Json
+  recommendations   Json
+  status            String   @default("pending")
+  paymentStatus     String   @default("pending")
+  paymentAmount     Float    @default(0)
+  tokensUsed        Int      @default(0)
+  promptCount       Int      @default(0)
+  failedPrompts     Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model ChatHistory {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId  String
+  message    String
+  response   String
+  tokensUsed Int      @default(0)
+  createdAt  DateTime @default(now())
+}
+
+model Payment {
+  id                 String    @id @default(cuid())
+  userId             String
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount             Float
+  currency           String    @default("KES")
+  paymentType        String
+  phoneNumber        String?
+  checkoutRequestId  String?
+  merchantRequestId  String?
+  mpesaReceiptNumber String?
+  status             String    @default("pending")
+  errorMessage       String?
+  metadata           Json
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  completedAt        DateTime?
+}
+
+model PaymentLog {
+  id           String   @id @default(cuid())
+  userId       String
+  paymentId    String
+  status       String
+  message      String?
+  errorCode    String?
+  errorMessage String?
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  // Add relation to User if needed
+  // user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ContactMessage {
+  id        String    @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  status    String    @default("pending")
+  repliedBy String?
+  repliedAt DateTime?
+  createdAt DateTime  @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model TokenUsage {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokensUsed  Int
+  promptCount Int
+  failedCount Int
+  date        DateTime @default(now())
+}
