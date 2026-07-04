@@ -20,70 +20,101 @@ class PDFParser:
         self.patterns = {
             # Main M-PESA transaction pattern - matches each row in the table
             "mpesa_transaction": re.compile(
-                r'([A-Z0-9]{10})\s+'           # Receipt No (e.g., UF3PZ6NAAG)
-                r'(\d{4}-\d{2}-\d{2})\s+'      # Date (e.g., 2026-06-03)
-                r'(\d{2}:\d{2}:\d{2})\s+'      # Time (e.g., 19:25:51)
-                r'(.+?)\s+'                    # Details
-                r'(Completed|Failed|Pending)\s+'  # Status
-                r'(-?[\d,]+\.\d{2})\s+'        # Paid In
-                r'(-?[\d,]+\.\d{2})\s+'        # Withdrawn
-                r'([\d,]+\.\d{2})'             # Balance
+                r"([A-Z0-9]{10})\s+"  # Receipt No (e.g., UF3PZ6NAAG)
+                r"(\d{4}-\d{2}-\d{2})\s+"  # Date (e.g., 2026-06-03)
+                r"(\d{2}:\d{2}:\d{2})\s+"  # Time (e.g., 19:25:51)
+                r"(.+?)\s+"  # Details
+                r"(Completed|Failed|Pending)\s+"  # Status
+                r"(-?[\d,]+\.\d{2})\s+"  # Paid In
+                r"(-?[\d,]+\.\d{2})\s+"  # Withdrawn
+                r"([\d,]+\.\d{2})"  # Balance
             ),
-            "mpesa_receipt": re.compile(r'[A-Z0-9]{10}'),
-            "fuliza": re.compile(r'(?:FULIZA|Fuliza|OverDraft|OD Loan)'),
-            "m_shwari": re.compile(r'(?:M-SHWARI|MShwari)'),
-            "paybill": re.compile(r'PayBill\s+(\d+)'),
-            "till": re.compile(r'Till\s+(\d+)'),
-            "amount": re.compile(r'([\d,]+\.\d{2})'),
-            "phone": re.compile(r'07\d{8}|01\d{8}|2547\d{8}'),
-            "balance": re.compile(r'Balance[:\s]*([\d,]+\.\d{2})', re.IGNORECASE),
+            "mpesa_receipt": re.compile(r"[A-Z0-9]{10}"),
+            "fuliza": re.compile(r"(?:FULIZA|Fuliza|OverDraft|OD Loan)"),
+            "m_shwari": re.compile(r"(?:M-SHWARI|MShwari)"),
+            "paybill": re.compile(r"PayBill\s+(\d+)"),
+            "till": re.compile(r"Till\s+(\d+)"),
+            "amount": re.compile(r"([\d,]+\.\d{2})"),
+            "phone": re.compile(r"07\d{8}|01\d{8}|2547\d{8}"),
+            "balance": re.compile(r"Balance[:\s]*([\d,]+\.\d{2})", re.IGNORECASE),
             "date_range": re.compile(
-                r'(\d{4}-\d{2}-\d{2})\s*[-to]+\s*(\d{4}-\d{2}-\d{2})',
+                r"(\d{4}-\d{2}-\d{2})\s*[-to]+\s*(\d{4}-\d{2}-\d{2})",
                 re.IGNORECASE,
             ),
             "account_number": re.compile(
-                r'Account\s*(?:No|Number)[:\s]*([\d-]+)', re.IGNORECASE
+                r"Account\s*(?:No|Number)[:\s]*([\d-]+)", re.IGNORECASE
             ),
             "customer_name": re.compile(
-                r'(?:Customer|Name)[:\s]*([A-Za-z\s]+)', re.IGNORECASE
+                r"(?:Customer|Name)[:\s]*([A-Za-z\s]+)", re.IGNORECASE
             ),
             "bank_name": re.compile(
-                r'(KCB|Equity|Cooperative|Stanbic|ABSA|NCBA|I&M'
-                r'|Standard Chartered|Barclays|Absa)',
+                r"(KCB|Equity|Cooperative|Stanbic|ABSA|NCBA|I&M"
+                r"|Standard Chartered|Barclays|Absa)",
                 re.IGNORECASE,
             ),
-            "mpesa": re.compile(r'(?:M-PESA|MPESA)', re.IGNORECASE),
+            "mpesa": re.compile(r"(?:M-PESA|MPESA)", re.IGNORECASE),
             "transaction_fee": re.compile(
-                r'(?:Fee|Charge)[:\s]*([\d,]+\.\d{2})', re.IGNORECASE
+                r"(?:Fee|Charge)[:\s]*([\d,]+\.\d{2})", re.IGNORECASE
             ),
-            "airtime": re.compile(r'(?:Airtime|Scratch Card|Bundle)', re.IGNORECASE),
+            "airtime": re.compile(r"(?:Airtime|Scratch Card|Bundle)", re.IGNORECASE),
             "betting": re.compile(
-                r'(?:Bet|Gamble|Casino|Sportpesa|Betika|Shabiki)',
+                r"(?:Bet|Gamble|Casino|Sportpesa|Betika|Shabiki)",
                 re.IGNORECASE,
             ),
             "received_money": re.compile(
-                r'Funds received from|Received from|Received Money',
-                re.IGNORECASE
+                r"Funds received from|Received from|Received Money", re.IGNORECASE
             ),
-            "send_money": re.compile(r'Send Money|Transfer|Sent to', re.IGNORECASE),
-            "agent_deposit": re.compile(r'Deposit of Funds at Agent', re.IGNORECASE),
-            "agent_withdrawal": re.compile(r'Withdrawal At Agent', re.IGNORECASE),
-            "merchant_payment": re.compile(r'Merchant Payment|Buy Goods|Till', re.IGNORECASE),
-            "salary": re.compile(r'Salary Payment from', re.IGNORECASE),
+            "send_money": re.compile(r"Send Money|Transfer|Sent to", re.IGNORECASE),
+            "agent_deposit": re.compile(r"Deposit of Funds at Agent", re.IGNORECASE),
+            "agent_withdrawal": re.compile(r"Withdrawal At Agent", re.IGNORECASE),
+            "merchant_payment": re.compile(
+                r"Merchant Payment|Buy Goods|Till", re.IGNORECASE
+            ),
+            "salary": re.compile(r"Salary Payment from", re.IGNORECASE),
         }
 
         self.financial_keywords = [
-            "amount", "balance", "credit", "debit", "transaction",
-            "mpesa", "m-pesa", "bank", "account", "withdrawal",
-            "deposit", "payment", "transfer", "fee", "charge",
-            "statement", "summary", "period", "date", "opening",
-            "closing", "total", "currency", "kes", "shillings",
-            "sender", "receiver", "recipient", "receipt",
+            "amount",
+            "balance",
+            "credit",
+            "debit",
+            "transaction",
+            "mpesa",
+            "m-pesa",
+            "bank",
+            "account",
+            "withdrawal",
+            "deposit",
+            "payment",
+            "transfer",
+            "fee",
+            "charge",
+            "statement",
+            "summary",
+            "period",
+            "date",
+            "opening",
+            "closing",
+            "total",
+            "currency",
+            "kes",
+            "shillings",
+            "sender",
+            "receiver",
+            "recipient",
+            "receipt",
         ]
 
         self.bank_keywords = [
-            "kcb", "equity", "cooperative", "stanbic", "absa",
-            "ncba", "i&m", "standard chartered", "barclays",
+            "kcb",
+            "equity",
+            "cooperative",
+            "stanbic",
+            "absa",
+            "ncba",
+            "i&m",
+            "standard chartered",
+            "barclays",
         ]
 
     # ─── Public parse methods ─────────────────────────────────────────────────
@@ -118,29 +149,31 @@ class PDFParser:
             raise ValueError(message)
 
         # Extract text
-        logger.info("🔍 Extracting text from PDF...")
+        # logger.info("🔍 Extracting text from PDF...")
         text = self._extract_text_from_pdf(file_content, password)
 
-        logger.info(f"📄 Extracted {len(text)} characters of text")
-        if text:
-            logger.info(f"📄 Text preview (first 500 chars):\n{text[:500]}...")
-        else:
-            logger.error("❌ No text extracted from PDF!")
-            raise ValueError("Could not extract text from PDF. The file may be empty, scanned, or corrupted.")
+        # logger.info(f"📄 Extracted {len(text)} characters of text")
+        # if text:
+        #     logger.info(f"📄 Text preview (first 500 chars):\n{text[:500]}...")
+        # else:
+        #     logger.error("❌ No text extracted from PDF!")
+        #     raise ValueError(
+        #         "Could not extract text from PDF. The file may be empty, scanned, or corrupted."
+        #     )
 
         # Extract transactions
-        logger.info("🔍 Extracting transactions from text...")
+        # logger.info("🔍 Extracting transactions from text...")
         transactions = self._extract_transactions(text)
 
         statement_type = self._detect_statement_type(text)
         metadata = self._extract_metadata(text)
         summary = self._calculate_summary(transactions)
 
-        logger.info("=" * 80)
-        logger.info(f"✅ [PDF PARSER] parse_statement() complete")
-        logger.info(f"   Transactions: {len(transactions)}")
-        logger.info(f"   Statement type: {statement_type}")
-        logger.info("=" * 80)
+        # logger.info("=" * 80)
+        # logger.info(f"✅ [PDF PARSER] parse_statement() complete")
+        # logger.info(f"   Transactions: {len(transactions)}")
+        # logger.info(f"   Statement type: {statement_type}")
+        # logger.info("=" * 80)
 
         return {
             "transactions": transactions,
@@ -157,7 +190,7 @@ class PDFParser:
 
     def parse_csv(self, file_path: str) -> Dict[str, Any]:
         """Parse a CSV financial statement"""
-        logger.info(f"🔵 [PDF PARSER] parse_csv() called: {file_path}")
+        # logger.info(f"🔵 [PDF PARSER] parse_csv() called: {file_path}")
         try:
             df = pd.read_csv(file_path)
             transactions = self._df_to_transactions(df)
@@ -176,7 +209,7 @@ class PDFParser:
 
     def parse_excel(self, file_path: str) -> Dict[str, Any]:
         """Parse an Excel financial statement"""
-        logger.info(f"🔵 [PDF PARSER] parse_excel() called: {file_path}")
+        # logger.info(f"🔵 [PDF PARSER] parse_excel() called: {file_path}")
         try:
             df = pd.read_excel(file_path)
             transactions = self._df_to_transactions(df)
@@ -199,7 +232,7 @@ class PDFParser:
         self, file_content: bytes, password: Optional[str] = None
     ) -> str:
         """Extract text from PDF with better table support."""
-        logger.info("🔍 [PDF PARSER] _extract_text_from_pdf() called")
+        # logger.info("🔍 [PDF PARSER] _extract_text_from_pdf() called")
 
         text = ""
 
@@ -209,9 +242,9 @@ class PDFParser:
             if password:
                 open_kwargs["password"] = password
 
-            logger.info("   Using pdfplumber...")
+            # logger.info("   Using pdfplumber...")
             with pdfplumber.open(io.BytesIO(file_content), **open_kwargs) as pdf:
-                logger.info(f"   PDF has {len(pdf.pages)} pages")
+                # logger.info(f"   PDF has {len(pdf.pages)} pages")
 
                 for i, page in enumerate(pdf.pages):
                     logger.debug(f"   Processing page {i+1}...")
@@ -220,7 +253,9 @@ class PDFParser:
                     page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n"
-                        logger.debug(f"   Page {i+1}: {len(page_text)} chars from extract_text()")
+                        logger.debug(
+                            f"   Page {i+1}: {len(page_text)} chars from extract_text()"
+                        )
                     else:
                         logger.debug(f"   Page {i+1}: No text from extract_text()")
 
@@ -237,21 +272,33 @@ class PDFParser:
                             for row in table:
                                 if row:
                                     # Join row cells with spaces
-                                    row_text = " ".join(str(cell) for cell in row if cell and str(cell).strip())
+                                    row_text = " ".join(
+                                        str(cell)
+                                        for cell in row
+                                        if cell and str(cell).strip()
+                                    )
                                     if row_text:
                                         text += row_text + "\n"
-                                        logger.debug(f"   Table row: {row_text[:100]}...")
+                                        logger.debug(
+                                            f"   Table row: {row_text[:100]}..."
+                                        )
 
                     # If no text was extracted, try with different settings
                     if not page_text and not tables:
-                        logger.warning(f"   Page {i+1}: No text or tables found - trying with tolerance...")
+                        logger.warning(
+                            f"   Page {i+1}: No text or tables found - trying with tolerance..."
+                        )
                         try:
                             page_text = page.extract_text(x_tolerance=2, y_tolerance=2)
                             if page_text:
                                 text += page_text + "\n"
-                                logger.debug(f"   Page {i+1}: {len(page_text)} chars with tolerance")
+                                logger.debug(
+                                    f"   Page {i+1}: {len(page_text)} chars with tolerance"
+                                )
                         except Exception as e:
-                            logger.debug(f"   Page {i+1} tolerance extraction failed: {e}")
+                            logger.debug(
+                                f"   Page {i+1} tolerance extraction failed: {e}"
+                            )
 
             if text.strip():
                 logger.info(f"✅ pdfplumber extracted {len(text)} chars")
@@ -274,8 +321,10 @@ class PDFParser:
                     if password:
                         raise ValueError("Incorrect PDF password. Please try again.")
                     else:
-                        raise ValueError("PDF is password protected. Please provide the password.")
-                logger.info(f"   PyPDF2 decrypted PDF (result={result})")
+                        raise ValueError(
+                            "PDF is password protected. Please provide the password."
+                        )
+                # logger.info(f"   PyPDF2 decrypted PDF (result={result})")
 
             logger.info(f"   PyPDF2: {len(reader.pages)} pages")
             for i, page in enumerate(reader.pages):
@@ -367,24 +416,24 @@ class PDFParser:
 
         This handles multi-line Details fields.
         """
-        logger.info("=" * 80)
-        logger.info("🔍 [PDF PARSER] _extract_transactions() called")
-        logger.info(f"   Text length: {len(text)} characters")
+        # logger.info("=" * 80)
+        # logger.info("🔍 [PDF PARSER] _extract_transactions() called")
+        # logger.info(f"   Text length: {len(text)} characters")
 
         # ─── CRITICAL: Log the raw text for debugging ──────────────────────────
-        logger.info("📄 RAW TEXT PREVIEW (first 2000 chars):")
-        logger.info("-" * 60)
-        logger.info(text[:2000])
-        logger.info("-" * 60)
+        # logger.info("📄 RAW TEXT PREVIEW (first 2000 chars):")
+        # logger.info("-" * 60)
+        # logger.info(text[:2000])
+        # logger.info("-" * 60)
 
         # ─── Also log lines that might contain transactions ────────────────────
-        lines = text.split('\n')
-        logger.info(f"📄 Total lines: {len(lines)}")
-        logger.info("📄 First 30 lines:")
-        for i, line in enumerate(lines[:30]):
-            if line.strip():
-                logger.info(f"   Line {i+1}: {repr(line[:150])}")
-        logger.info("=" * 80)
+        lines = text.split("\n")
+        # logger.info(f"📄 Total lines: {len(lines)}")
+        # logger.info("📄 First 30 lines:")
+        # for i, line in enumerate(lines[:30]):
+        #     if line.strip():
+        #         logger.info(f"   Line {i+1}: {repr(line[:150])}")
+        # logger.info("=" * 80)
 
         transactions: List[Dict[str, Any]] = []
         seen: set = set()
@@ -395,7 +444,7 @@ class PDFParser:
 
         # ─── Check if text contains M-PESA keywords ──────────────────────────
         has_mpesa = "M-PESA" in text or "MPESA" in text
-        has_receipt = bool(re.search(r'[A-Z0-9]{10}', text))
+        has_receipt = bool(re.search(r"[A-Z0-9]{10}", text))
         has_completed = "Completed" in text
 
         logger.info(f"🔍 Text analysis:")
@@ -405,70 +454,65 @@ class PDFParser:
 
         if not has_mpesa and not has_receipt and not has_completed:
             logger.warning("⚠️ Text doesn't appear to contain M-PESA data!")
-            logger.info("   Showing first 20 lines for debugging:")
-            for i, line in enumerate(lines[:20]):
-                if line.strip():
-                    logger.info(f"   Line {i+1}: {line[:100]}")
+            # logger.info("   Showing first 20 lines for debugging:")
+            # for i, line in enumerate(lines[:20]):
+            #     if line.strip():
+            #         logger.info(f"   Line {i+1}: {line[:100]}")
             return transactions
 
         # ─── Try multiple patterns ──────────────────────────────────────────────
+
         patterns_to_try = [
-            # Pattern 1: Standard format with all fields
+            # ────────────────────────────────────────────────────────────────────────
+            # Pattern 1: Full statement
+            # Receipt Date Time Details Status PaidIn Withdrawn Balance
+            # ────────────────────────────────────────────────────────────────────────
             re.compile(
-                r'([A-Z0-9]{10})\s+'
-                r'(\d{4}-\d{2}-\d{2})\s+'
-                r'(\d{2}:\d{2}:\d{2})\s+'
-                r'(.+?)\s+'
-                r'(Completed|Failed|Pending)\s+'
-                r'(-?[\d,]+\.\d{2})\s+'
-                r'(-?[\d,]+\.\d{2})\s+'
-                r'([\d,]+\.\d{2})'
+                r"([A-Z0-9]{10})\s+"
+                r"(\d{4}-\d{2}-\d{2})\s+"
+                r"(\d{2}:\d{2}:\d{2})\s+"
+                r"(.+?)\s+"
+                r"(Completed|Failed|Pending)\s+"
+                r"(-?[\d,]+\.\d{2})\s+"
+                r"(-?[\d,]+\.\d{2})\s+"
+                r"([\d,]+\.\d{2})",
+                re.DOTALL,
             ),
-            # Pattern 2: With DOTALL flag for multi-line details
+            # ────────────────────────────────────────────────────────────────────────
+            # Pattern 2: No balance column
+            # Receipt Date Time Details Status PaidIn Withdrawn
+            # ────────────────────────────────────────────────────────────────────────
             re.compile(
-                r'([A-Z0-9]{10})\s+'
-                r'(\d{4}-\d{2}-\d{2})\s+'
-                r'(\d{2}:\d{2}:\d{2})\s+'
-                r'(.+?)\s+'
-                r'(Completed|Failed|Pending)\s+'
-                r'([\d,]+\.\d{2})\s+'
-                r'([\d,]+\.\d{2})\s+'
-                r'([\d,]+\.\d{2})',
-                re.DOTALL
+                r"([A-Z0-9]{10})\s+"
+                r"(\d{4}-\d{2}-\d{2})\s+"
+                r"(\d{2}:\d{2}:\d{2})\s+"
+                r"(.+?)\s+"
+                r"(Completed|Failed|Pending)\s+"
+                r"(-?[\d,]+\.\d{2})\s+"
+                r"(-?[\d,]+\.\d{2})",
+                re.DOTALL,
             ),
-            # Pattern 3: Without status field
+            # ────────────────────────────────────────────────────────────────────────
+            # Pattern 3: Single amount after status
+            # Receipt Date Time Details Status Amount
+            # ────────────────────────────────────────────────────────────────────────
             re.compile(
-                r'([A-Z0-9]{10})\s+'
-                r'(\d{4}-\d{2}-\d{2})\s+'
-                r'(\d{2}:\d{2}:\d{2})\s+'
-                r'(.+?)\s+'
-                r'([\d,]+\.\d{2})\s+'
-                r'([\d,]+\.\d{2})\s+'
-                r'([\d,]+\.\d{2})'
-            ),
-            # Pattern 4: Simple - just receipt + date + amount
-            re.compile(
-                r'([A-Z0-9]{10})\s+'
-                r'(\d{4}-\d{2}-\d{2})\s+'
-                r'(.+?)\s+'
-                r'([\d,]+\.\d{2})'
-            ),
-            # Pattern 5: Very lenient - receipt, date, details, amounts
-            re.compile(
-                r'([A-Z0-9]{10})\s+'
-                r'(\d{4}-\d{2}-\d{2})\s+'
-                r'(\d{2}:\d{2}:\d{2})\s+'
-                r'([^0-9]+?)\s+'
-                r'([\d,]+\.\d{2})\s+'
-                r'([\d,]+\.\d{2})',
-                re.DOTALL
+                r"([A-Z0-9]{10})\s+"
+                r"(\d{4}-\d{2}-\d{2})\s+"
+                r"(\d{2}:\d{2}:\d{2})\s+"
+                r"(.+?)\s+"
+                r"(Completed|Failed|Pending)\s+"
+                r"(-?[\d,]+\.\d{2})",
+                re.DOTALL,
             ),
         ]
 
         all_matches = []
         pattern_used = None
         for idx, pattern in enumerate(patterns_to_try):
+            logger.info(f"🔍 Trying Pattern {idx+1}...")
             matches = pattern.findall(text)
+
             logger.info(f"   Pattern {idx+1}: Found {len(matches)} matches")
             if matches:
                 all_matches = matches
@@ -479,9 +523,16 @@ class PDFParser:
         if not all_matches:
             # Try finding receipt numbers and extract manually
             logger.info("🔍 No pattern matches, trying receipt-based extraction...")
-            receipt_pattern = re.compile(r'([A-Z0-9]{10})')
+            receipt_pattern = re.compile(r"([A-Z0-9]{10})")
             receipt_matches = receipt_pattern.findall(text)
             logger.info(f"   Found {len(receipt_matches)} receipt numbers")
+
+            receipt = receipt_matches[0]
+            pos = text.find(receipt)
+
+            logger.info("=" * 80)
+            logger.info(repr(text[pos : pos + 300]))
+            logger.info("=" * 80)
 
             # Show first 10 receipts with context
             for idx, receipt in enumerate(receipt_matches[:10]):
@@ -489,7 +540,7 @@ class PDFParser:
                 # Find context around receipt
                 pos = text.find(receipt)
                 if pos != -1:
-                    context = text[pos:pos+250]
+                    context = text[pos : pos + 250]
                     logger.info(f"   Context: {repr(context)}")
 
             logger.warning("⚠️ No matches found with any pattern!")
@@ -501,16 +552,55 @@ class PDFParser:
                 logger.debug(f"   Processing match {match_idx+1}: {match}")
 
                 if len(match) == 8:
-                    receipt, date_str, time_str, details, status, paid_in_str, withdrawn_str, balance_str = match
+                    (
+                        receipt,
+                        date_str,
+                        time_str,
+                        details,
+                        status,
+                        paid_in_str,
+                        withdrawn_str,
+                        balance_str,
+                    ) = match
+
                 elif len(match) == 7:
-                    receipt, date_str, time_str, details, paid_in_str, withdrawn_str, balance_str = match
-                    status = "Completed"
+                    (
+                        receipt,
+                        date_str,
+                        time_str,
+                        details,
+                        status,
+                        paid_in_str,
+                        withdrawn_str,
+                    ) = match
+                    balance_str = "0.00"
+
+                elif len(match) == 6:
+                    (
+                        receipt,
+                        date_str,
+                        time_str,
+                        details,
+                        status,
+                        amount_str,
+                    ) = match
+
+                    balance_str = "0.00"
+
+                    amount = float(amount_str.replace(",", ""))
+
+                    if amount >= 0:
+                        paid_in_str = amount_str
+                        withdrawn_str = "0.00"
+                    else:
+                        paid_in_str = "0.00"
+                        withdrawn_str = str(abs(amount))
                 elif len(match) == 4:
                     # Simple pattern: receipt, date, details, amount
                     receipt, date_str, details, amount_str = match
                     time_str = "00:00:00"
                     status = "Completed"
-                    amount = float(amount_str.replace(',', ''))
+                    amount = float(amount_str.replace(",", ""))
                     if amount > 0:
                         paid_in_str = amount_str
                         withdrawn_str = "0.00"
@@ -529,15 +619,28 @@ class PDFParser:
                     withdrawn_str = amt2
                     balance_str = "0.00"
                 else:
-                    logger.debug(f"   Match {match_idx+1}: Unexpected length {len(match)}, skipping")
+                    logger.debug(
+                        f"   Match {match_idx+1}: Unexpected length {len(match)}, skipping"
+                    )
                     continue
 
                 # Clean amounts
-                paid_in = float(paid_in_str.replace(',', '')) if paid_in_str else 0.0
-                withdrawn = float(withdrawn_str.replace(',', '')) if withdrawn_str else 0.0
-                balance = float(balance_str.replace(',', '')) if balance_str else 0.0
+                paid_in = float(paid_in_str.replace(",", "")) if paid_in_str else 0.0
+                withdrawn = (
+                    float(withdrawn_str.replace(",", "")) if withdrawn_str else 0.0
+                )
+                balance = float(balance_str.replace(",", "")) if balance_str else 0.0
 
-                # Determine transaction type
+                # Normalize signed values
+                if paid_in < 0:
+                    withdrawn = abs(paid_in)
+                    paid_in = 0.0
+
+                if withdrawn < 0:
+                    paid_in = abs(withdrawn)
+                    withdrawn = 0.0
+
+                # Compute canonical amount/type
                 if paid_in > 0:
                     amount = paid_in
                     tx_type = "income"
@@ -545,11 +648,11 @@ class PDFParser:
                     amount = withdrawn
                     tx_type = "expense"
                 else:
-                    amount = 0
+                    amount = 0.0
                     tx_type = "unknown"
 
                 # Clean details
-                details = re.sub(r'\s+', ' ', details).strip()
+                details = re.sub(r"\s+", " ", details).strip()
 
                 tx = {
                     "receipt": receipt,
@@ -563,7 +666,6 @@ class PDFParser:
                     "amount": amount,
                     "type": tx_type,
                 }
-
                 # ── Category detection ──────────────────────────────────────
                 desc_lower = details.lower()
 
@@ -597,7 +699,7 @@ class PDFParser:
                     tx["category"] = "Loan Repayment"
 
                 # Extract phone number
-                phone_match = re.search(r'2547\d{8}|07\d{8}', details)
+                phone_match = re.search(r"2547\d{8}|07\d{8}", details)
                 if phone_match:
                     tx["phone"] = phone_match.group()
 
@@ -606,7 +708,6 @@ class PDFParser:
                 if tx_id not in seen:
                     seen.add(tx_id)
                     transactions.append(tx)
-                    logger.info(f"✅ Extracted transaction {len(transactions)}: {receipt} {date_str} {amount} {tx_type}")
 
             except Exception as e:
                 logger.error(f"   ❌ Parse error for match {match_idx+1}: {e}")
@@ -640,13 +741,23 @@ class PDFParser:
                     break
                 line_stripped = line.strip()
                 if line_stripped and (
-                    any(k in line_stripped for k in ["UF3", "Receipt", "Completed", "2026-", "funds", "payment"])
+                    any(
+                        k in line_stripped
+                        for k in [
+                            "UF3",
+                            "Receipt",
+                            "Completed",
+                            "2026-",
+                            "funds",
+                            "payment",
+                        ]
+                    )
                 ):
                     logger.info(f"   Line {count+1}: {repr(line_stripped[:150])}")
                     count += 1
 
             # Also check if the text contains any amount patterns
-            amount_pattern = re.compile(r'[\d,]+\.\d{2}')
+            amount_pattern = re.compile(r"[\d,]+\.\d{2}")
             amount_matches = amount_pattern.findall(text)
             logger.info(f"🔍 Found {len(amount_matches)} potential amount strings")
             if amount_matches:
@@ -656,43 +767,80 @@ class PDFParser:
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
-    def _df_to_transactions(
-        self, df: pd.DataFrame
-    ) -> List[Dict[str, Any]]:
-        """Convert a DataFrame to the standard transaction list format"""
+    def _df_to_transactions(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """Convert a DataFrame to the standard transaction list format."""
+
         logger.info(f"🔍 [PDF PARSER] _df_to_transactions() called with {len(df)} rows")
 
         date_col = desc_col = amount_col = None
 
         for col in df.columns:
-            cl = col.lower()
-            if "date" in cl and date_col is None:
+            cl = str(col).lower()
+
+            if date_col is None and "date" in cl:
                 date_col = col
-            if (
-                any(k in cl for k in ["description", "desc", "narration", "details"])
-                and desc_col is None
+
+            if desc_col is None and any(
+                k in cl for k in ("description", "desc", "details", "narration")
             ):
                 desc_col = col
-            if (
-                any(k in cl for k in ["amount", "value", "credit", "debit"])
-                and amount_col is None
+
+            if amount_col is None and any(
+                k in cl for k in ("amount", "value", "credit", "debit")
             ):
                 amount_col = col
 
-        transactions: List[Dict[str, Any]] = []
+        transactions = []
+
         for _, row in df.iterrows():
-            tx: Dict[str, Any] = {}
+            tx = {}
+
             if date_col:
-                tx["date"] = str(row[date_col])
+                tx["date"] = str(row[date_col]).strip()
+
             if desc_col:
-                tx["description"] = str(row[desc_col])
+                desc = str(row[desc_col]).strip()
+
+                # Handle merged PDF column:
+                # 20:26:14 Merchant Payment Fuliza M-Pesa Completed -130.00
+                m = re.match(
+                    r"""
+                    ^
+                    (?:(\d{2}:\d{2}:\d{2})\s+)?      # optional time
+                    (.*?)                           # description
+                    \s+
+                    (Completed|Failed|Pending)      # status
+                    \s+
+                    (-?[\d,]+\.\d{2})              # trailing amount
+                    $
+                    """,
+                    desc,
+                    re.IGNORECASE | re.VERBOSE,
+                )
+
+                if m:
+                    tx["time"] = m.group(1) or ""
+                    tx["description"] = m.group(2).strip()
+                    tx["status"] = m.group(3)
+
+                    if amount_col is None:
+                        try:
+                            tx["amount"] = abs(float(m.group(4).replace(",", "")))
+                        except ValueError:
+                            tx["amount"] = 0.0
+                else:
+                    tx["description"] = desc
+
             if amount_col:
                 try:
-                    tx["amount"] = float(row[amount_col])
-                except (ValueError, TypeError):
+                    tx["amount"] = float(str(row[amount_col]).replace(",", ""))
+                except (TypeError, ValueError):
                     tx["amount"] = 0.0
+
+            if "description" in tx:
+                tx["type"] = self._determine_transaction_type(tx["description"])
+
             if "date" in tx and "description" in tx:
-                tx["type"] = self._determine_transaction_type(tx.get("description", ""))
                 transactions.append(tx)
 
         logger.info(f"📊 Extracted {len(transactions)} transactions from DataFrame")
@@ -715,18 +863,54 @@ class PDFParser:
         """Determine if a transaction is income or expense based on description"""
         desc_lower = description.lower()
         income_kw = [
-            "received", "sent to you", "credit", "deposit", "salary",
-            "payment from", "income", "wages", "commission", "dividend",
-            "refund", "reimbursement", "stipend", "grant", "bonus",
-            "received from", "funds received", "paid in",
+            "received",
+            "sent to you",
+            "credit",
+            "deposit",
+            "salary",
+            "payment from",
+            "income",
+            "wages",
+            "commission",
+            "dividend",
+            "refund",
+            "reimbursement",
+            "stipend",
+            "grant",
+            "bonus",
+            "received from",
+            "funds received",
+            "paid in",
         ]
         expense_kw = [
-            "sent", "paid", "debit", "withdraw", "transfer to",
-            "payment to", "purchase", "buy", "subscription", "bill",
-            "rent", "utility", "grocery", "food", "transport", "fuel",
-            "airtime", "bet", "gamble", "loan", "repayment",
-            "sent to", "pay bill", "buy goods", "withdrawn",
-            "withdrawal", "charge", "fee",
+            "sent",
+            "paid",
+            "debit",
+            "withdraw",
+            "transfer to",
+            "payment to",
+            "purchase",
+            "buy",
+            "subscription",
+            "bill",
+            "rent",
+            "utility",
+            "grocery",
+            "food",
+            "transport",
+            "fuel",
+            "airtime",
+            "bet",
+            "gamble",
+            "loan",
+            "repayment",
+            "sent to",
+            "pay bill",
+            "buy goods",
+            "withdrawn",
+            "withdrawal",
+            "charge",
+            "fee",
         ]
         for kw in income_kw:
             if kw in desc_lower:
@@ -772,7 +956,7 @@ class PDFParser:
                 metadata["phone_number"] = phone_m.group()
 
         # Extract statement verification code
-        code_match = re.search(r'GGXTGREW', text)
+        code_match = re.search(r"GGXTGREW", text)
         if code_match:
             metadata["statement_code"] = code_match.group()
 
@@ -780,23 +964,17 @@ class PDFParser:
             r"Opening\s+Balance[:\s]*([\d,]+\.\d{2})", text, re.IGNORECASE
         )
         if opening_m:
-            metadata["opening_balance"] = float(
-                opening_m.group(1).replace(",", "")
-            )
+            metadata["opening_balance"] = float(opening_m.group(1).replace(",", ""))
 
         closing_m = re.search(
             r"Closing\s+Balance[:\s]*([\d,]+\.\d{2})", text, re.IGNORECASE
         )
         if closing_m:
-            metadata["closing_balance"] = float(
-                closing_m.group(1).replace(",", "")
-            )
+            metadata["closing_balance"] = float(closing_m.group(1).replace(",", ""))
 
         return metadata
 
-    def _calculate_summary(
-        self, transactions: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _calculate_summary(self, transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Calculate summary statistics from transactions"""
         if not transactions:
             return {
@@ -841,7 +1019,9 @@ class PDFParser:
             "total_income": round(total_income, 2),
             "total_expenses": round(total_expenses, 2),
             "net_cash_flow": round(total_income - total_expenses, 2),
-            "average_transaction": round(sum(amounts) / len(amounts), 2) if amounts else 0.0,
+            "average_transaction": (
+                round(sum(amounts) / len(amounts), 2) if amounts else 0.0
+            ),
             "highest_transaction": max(amounts) if amounts else 0.0,
             "lowest_transaction": min(amounts) if amounts else 0.0,
             "unique_categories": list(categories),

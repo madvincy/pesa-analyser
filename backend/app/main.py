@@ -4,25 +4,29 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any
 import os
+import logging
 from dotenv import load_dotenv
 
 from app.core.cache import redis_client
 from app.core.database import engine, Base
-import logging
+from app.core.logging_config import setup_logging
 
-# Import model modules so their classes register on Base.metadata
+# ─── Setup logging FIRST before anything else ──────────────────────────────
+# This must come BEFORE the logging.disable() calls
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
+
+# ─── Import model modules so their classes register on Base.metadata ──────
 # before create_all() runs. If you add new models later, import them here too.
-from app.models import user as _user_models      # noqa: F401
+from app.models import user as _user_models  # noqa: F401
 from app.models import analysis as _analysis_models  # noqa: F401
 
 load_dotenv()
 
-# Silence all logging from libraries and internal loggers in this environment
-logging.disable(logging.CRITICAL)
+# ─── REMOVE these lines ──────────────────────────────────────────────────────
+# ❌ REMOVE: logging.disable(logging.CRITICAL)
+# ❌ REMOVE: logging.disable(logging.CRITICAL)  (duplicate)
 
-# Disable logging from libraries and internal loggers in this environment
-logging.disable(logging.CRITICAL)
-
+# ─── Import routers after logging is configured ────────────────────────────
 from app.routers import (
     user_router,
     admin_router,
@@ -30,15 +34,20 @@ from app.routers import (
     analysis_router,
     reports_router,
     payment_router,
-    results_router
+    results_router,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("🚀 Starting Pesa Analyser API...")
     Base.metadata.create_all(bind=engine)
     redis_client.connect()
+    logger.info("✅ Database and Redis connected")
     yield
+    logger.info("🛑 Shutting down Pesa Analyser API...")
     redis_client.disconnect()
 
 
@@ -46,7 +55,7 @@ app: FastAPI = FastAPI(
     title="Pesa Analyser API",
     version="1.0.0",
     description="AI-powered financial statement analysis",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -79,4 +88,5 @@ async def health_check() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
