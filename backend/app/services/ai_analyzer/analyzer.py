@@ -57,15 +57,7 @@ class AIAnalyzer:
 
     def _check_available_providers(self) -> List[str]:
         """Check which AI providers are available."""
-        providers = []
-        for key, name in [
-            (self.gemini_api_key, "gemini"),
-            (self.claude_api_key, "claude"),
-            (self.deepseek_api_key, "deepseek"),
-            (self.openai_api_key, "openai"),
-        ]:
-            if key and not key.startswith("your_"):
-                providers.append(name)
+        providers = self.ai_provider_factory.get_available_providers()
 
         if not providers:
             logger.warning(
@@ -102,22 +94,28 @@ Be specific — mention actual amounts and merchants from the data.
         self, transactions: List[Dict[str, Any]], statement_type: str = "unknown"
     ) -> Dict[str, Any]:
         """
-                Analyze pre-parsed transactions directly.
+        Analyze pre-parsed transactions directly.
 
-                Args:
-                    transactions: List of transaction dictionaries
-                    statement_type: Type of statement
-        -
-                Returns:
-                    Dictionary with complete analysis results
+        Args:
+            transactions: List of transaction dictionaries
+            statement_type: Type of statement
+
+        Returns:
+            Dictionary with complete analysis results
         """
         if not transactions:
             logger.warning("⚠️ No transactions provided")
             return self._empty_result()
 
         logger.info(f"🔵 Analyzing {len(transactions)} transactions")
-        result = self._deterministic_analysis(transactions, statement_type)
 
+        try:
+            result = self._deterministic_analysis(transactions, statement_type)
+        except Exception as e:
+            logger.error(f"❌ Deterministic analysis failed: {e}", exc_info=True)
+            return self._empty_result()
+
+        # Try AI enrichment (non-blocking, failures are logged but don't break response)
         try:
             ai_result = await self._try_ai_providers(
                 transactions, statement_type, result
@@ -125,6 +123,10 @@ Be specific — mention actual amounts and merchants from the data.
             if ai_result:
                 result.update(ai_result)
                 logger.info("✅ AI enrichment successful")
+            else:
+                logger.info(
+                    "ℹ️ AI enrichment returned no results, using deterministic analysis only"
+                )
         except Exception as e:
             logger.warning(f"⚠️ AI enrichment failed: {e}")
 
@@ -148,14 +150,34 @@ Be specific — mention actual amounts and merchants from the data.
         if not transactions:
             empty = self._empty_result()
             if on_stage:
-                await on_stage("basic_summary", empty)
+                try:
+                    await on_stage("basic_summary", empty)
+                except Exception as e:
+                    logger.warning(f"⚠️ Stage callback failed: {e}")
             return empty
 
         logger.info(f"🔵 Running staged analysis on {len(transactions)} transactions")
-        logger.info(f"transactions sample: {json.dumps(transactions[:3], indent=2)}")
 
-        # Run full deterministic analysis
-        full = self._deterministic_analysis(transactions, statement_type)
+        # Log sample transactions for debugging (safely)
+        try:
+            logger.info(
+                f"transactions sample: {json.dumps(transactions[:3], indent=2, default=str)}"
+            )
+        except Exception:
+            logger.info("transactions sample: (unable to serialize)")
+
+        # Run full deterministic analysis (with error handling)
+        try:
+            full = self._deterministic_analysis(transactions, statement_type)
+        except Exception as e:
+            logger.error(f"❌ Deterministic analysis failed: {e}", exc_info=True)
+            empty = self._empty_result()
+            if on_stage:
+                try:
+                    await on_stage("basic_summary", empty)
+                except Exception:
+                    pass
+            return empty
 
         # Stage 1: Basic summary
         basic_summary = self._extract_stage(
@@ -184,7 +206,10 @@ Be specific — mention actual amounts and merchants from the data.
             ],
         )
         if on_stage:
-            await on_stage("basic_summary", basic_summary)
+            try:
+                await on_stage("basic_summary", basic_summary)
+            except Exception as e:
+                logger.warning(f"⚠️ Stage callback (basic_summary) failed: {e}")
 
         # Stage 2: Category breakdown
         category_breakdown = self._extract_stage(
@@ -203,7 +228,10 @@ Be specific — mention actual amounts and merchants from the data.
             ],
         )
         if on_stage:
-            await on_stage("category_breakdown", category_breakdown)
+            try:
+                await on_stage("category_breakdown", category_breakdown)
+            except Exception as e:
+                logger.warning(f"⚠️ Stage callback (category_breakdown) failed: {e}")
 
         # Stage 3: Behavior metrics
         behavior_metrics = self._extract_stage(
@@ -220,7 +248,10 @@ Be specific — mention actual amounts and merchants from the data.
             ],
         )
         if on_stage:
-            await on_stage("behavior_metrics", behavior_metrics)
+            try:
+                await on_stage("behavior_metrics", behavior_metrics)
+            except Exception as e:
+                logger.warning(f"⚠️ Stage callback (behavior_metrics) failed: {e}")
 
         # Stage 4: Insights
         insights_stage = self._extract_stage(
@@ -234,9 +265,12 @@ Be specific — mention actual amounts and merchants from the data.
             ],
         )
         if on_stage:
-            await on_stage("insights", insights_stage)
+            try:
+                await on_stage("insights", insights_stage)
+            except Exception as e:
+                logger.warning(f"⚠️ Stage callback (insights) failed: {e}")
 
-        # ─── AI Enrichment ───────────────────────────────────────────────
+        # ─── AI Enrichment (non-blocking) ──────────────────────────────────
         try:
             ai_result = await self._try_ai_providers(transactions, statement_type, full)
             if ai_result:
@@ -255,7 +289,16 @@ Be specific — mention actual amounts and merchants from the data.
                     ],
                 )
                 if on_stage:
-                    await on_stage("insights", enriched_insights)
+                    try:
+                        await on_stage("insights", enriched_insights)
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ Stage callback (enriched insights) failed: {e}"
+                        )
+            else:
+                logger.info(
+                    "ℹ️ AI enrichment returned no results — deterministic insights stand"
+                )
         except Exception as e:
             logger.warning(f"⚠️ AI enrichment failed: {e}")
 

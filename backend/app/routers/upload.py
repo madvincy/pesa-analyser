@@ -54,12 +54,34 @@ from app.middleware.auth import (
 # WebSocket connection registry
 from app.core.websocket_manager import manager
 
+# Elasticsearch service (optional)
+try:
+    from app.services.elasticsearch_service import ElasticsearchService
+
+    ELASTICSEARCH_ENABLED = True
+except ImportError:
+    ELASTICSEARCH_ENABLED = False
+    logger = logging.getLogger(__name__)
+    logger.warning("⚠️ Elasticsearch service not available")
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Initialize services with the modular parser
 pdf_parser = PDFParser(debug=True)
 ai_analyzer = AIAnalyzer()
+
+# Initialize Elasticsearch service (if available)
+elasticsearch_service = None
+if ELASTICSEARCH_ENABLED:
+    try:
+        import asyncio
+
+        elasticsearch_service = ElasticsearchService()
+        # We'll connect lazily when needed
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to initialize Elasticsearch: {e}")
+        elasticsearch_service = None
 
 
 # ─── WebSocket auth helper ─────────────────────────────────────────────────
@@ -76,6 +98,84 @@ async def resolve_ws_user(token: str, db: Session) -> User:
         return _get_or_create_mock_user(db)
 
     raise ValueError("Invalid or expired token.")
+
+
+# ─── Elasticsearch Indexing Helper ─────────────────────────────────────────
+async def index_analysis_to_elasticsearch(
+    file_id: str,
+    user_id: str,
+    file_name: str,
+    transactions: List[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+) -> None:
+    """
+    Index analysis results to Elasticsearch for search.
+    This is non-blocking - failures are logged but don't affect the response.
+    """
+    if not ELASTICSEARCH_ENABLED or elasticsearch_service is None:
+        logger.debug("Elasticsearch not available, skipping indexing")
+        return
+
+    try:
+        # Connect if not already connected
+        if not hasattr(elasticsearch_service, "_connected"):
+            await elasticsearch_service.connect()
+            elasticsearch_service._connected = True
+
+        # Prepare document for indexing
+        document = {
+            "document_id": file_id,
+            "user_id": str(user_id),
+            "file_name": file_name,
+            "file_type": "pdf",
+            "upload_date": datetime.now().isoformat(),
+            "statement_type": analysis_result.get("statement_type", "unknown"),
+            "transaction_count": len(transactions),
+            "total_income": analysis_result.get("total_income", 0),
+            "total_expenses": analysis_result.get("total_expenses", 0),
+            "net_cash_flow": analysis_result.get("net_cash_flow", 0),
+            "health_score": analysis_result.get("health_score", 0),
+            "transactions": transactions[:1000],  # Limit for ES
+            "categories": [
+                c.get("name") for c in analysis_result.get("category_data", [])
+            ],
+            "merchants": list(
+                set(
+                    t.get("merchant_name") or t.get("till_number") or t.get("paybill")
+                    for t in transactions
+                    if t.get("merchant_name")
+                    or t.get("till_number")
+                    or t.get("paybill")
+                )
+            )[:50],
+            "insights": analysis_result.get("insights", []),
+            "warnings": analysis_result.get("warnings", []),
+            "recommendations": analysis_result.get("recommendations", []),
+            "monthly_data": analysis_result.get("monthly_data", []),
+            "processed_at": datetime.now().isoformat(),
+        }
+
+        # Index to Elasticsearch
+        await elasticsearch_service.index_document(
+            document_id=file_id,
+            user_id=str(user_id),
+            file_name=file_name,
+            content=json.dumps(document),
+            file_type="pdf",
+            file_size=0,
+            metadata={
+                "statement_type": analysis_result.get("statement_type", "unknown")
+            },
+            transactions=transactions[:500],  # Limit for ES
+        )
+
+        logger.info(f"✅ Indexed analysis {file_id} to Elasticsearch")
+
+    except ImportError as e:
+        logger.debug(f"Elasticsearch import error: {e}")
+    except Exception as e:
+        # Non-blocking - just log the error
+        logger.debug(f"⚠️ Failed to index to Elasticsearch: {e}")
 
 
 # ─── Staged analysis persistence ────────────────────────────────────────────
@@ -128,6 +228,7 @@ def _make_stage_persister(
                 )
                 db.rollback()
 
+        # ✅ FIX: WebSocket notification is optional - never fail the request
         try:
             await manager.send_status(
                 file_id,
@@ -138,7 +239,8 @@ def _make_stage_persister(
                 },
             )
         except Exception as e:
-            logger.warning(f"WS notify (stage {stage}) failed: {e}")
+            # WebSocket failure is not critical - log debug only
+            logger.debug(f"WS notify (stage {stage}) failed: {e}")
 
     return persist_stage
 
@@ -607,6 +709,18 @@ async def upload_statement(
                 except Exception as e:
                     logger.warning(f"Redis set failed: {e}")
 
+                # ✅ Index to Elasticsearch (non-blocking)
+                try:
+                    await index_analysis_to_elasticsearch(
+                        file_id=file_id,
+                        user_id=str(user_id),
+                        file_name=filename,
+                        transactions=transactions,
+                        analysis_result=analysis_result,
+                    )
+                except Exception as e:
+                    logger.debug(f"Elasticsearch indexing skipped: {e}")
+
                 # Clean up temp file
                 if os.path.exists(temp_path):
                     try:
@@ -614,7 +728,7 @@ async def upload_statement(
                     except Exception:
                         pass
 
-                # Notify WebSocket clients
+                # ✅ FIX: WebSocket notification is optional
                 try:
                     await manager.send_status(
                         file_id,
@@ -624,7 +738,7 @@ async def upload_statement(
                         },
                     )
                 except Exception as e:
-                    logger.warning(f"WS notify (sync path) failed: {e}")
+                    logger.debug(f"WS notify (sync path) failed: {e}")
 
                 return JSONResponse(
                     {
@@ -640,10 +754,13 @@ async def upload_statement(
 
             except Exception as e:
                 logger.error(f"Synchronous analysis failed: {e}", exc_info=True)
+                # ✅ FIX: Fall back to background processing instead of failing
+                logger.info("Falling back to background processing...")
 
         # ─── Background Processing for Large Files ───────────────────────────
         logger.info(f"📤 Queuing background task for {tx_count} transactions...")
 
+        # ✅ FIX: WebSocket notification is optional
         try:
             await manager.send_status(
                 file_id,
@@ -654,7 +771,7 @@ async def upload_statement(
                 },
             )
         except Exception as e:
-            logger.warning(f"WS notify (queued) failed: {e}")
+            logger.debug(f"WS notify (queued) failed: {e}")
 
         # Note: We don't pass `db` here - process_analysis opens its own session
         background_tasks.add_task(process_analysis, file_id, parsed_data, temp_path)
@@ -700,14 +817,18 @@ async def process_analysis(
     db: Session = SessionLocal()
 
     try:
-        await manager.send_status(
-            file_id,
-            {
-                "status": "processing",
-                "progress": 10,
-                "message": "Extracting transactions…",
-            },
-        )
+        # ✅ FIX: WebSocket notification is optional
+        try:
+            await manager.send_status(
+                file_id,
+                {
+                    "status": "processing",
+                    "progress": 10,
+                    "message": "Extracting transactions…",
+                },
+            )
+        except Exception as e:
+            logger.debug(f"WS notify (processing) failed: {e}")
 
         transactions: List[Dict[str, Any]] = parsed_data.get("transactions", [])
         statement_type: str = parsed_data.get("statement_type", "unknown")
@@ -721,13 +842,16 @@ async def process_analysis(
 
         if not analysis:
             logger.error(f"❌ Analysis record not found for {file_id}")
-            await manager.send_status(
-                file_id,
-                {
-                    "status": "failed",
-                    "error": "Analysis record not found.",
-                },
-            )
+            try:
+                await manager.send_status(
+                    file_id,
+                    {
+                        "status": "failed",
+                        "error": "Analysis record not found.",
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"WS notify (failed) failed: {e}")
             return
 
         logger.info(f"   Analysis user_id: {analysis.user_id}")
@@ -796,14 +920,29 @@ async def process_analysis(
         except Exception as e:
             logger.warning(f"Redis set failed: {e}, continuing without cache")
 
+        # ✅ Index to Elasticsearch (non-blocking)
+        try:
+            await index_analysis_to_elasticsearch(
+                file_id=file_id,
+                user_id=str(analysis.user_id),
+                file_name=analysis.file_name,
+                transactions=transactions,
+                analysis_result=analysis_result,
+            )
+        except Exception as e:
+            logger.debug(f"Elasticsearch indexing skipped: {e}")
+
         # ─── Notify WebSocket Clients ────────────────────────────────────────
-        await manager.send_status(
-            file_id,
-            {
-                "status": "completed",
-                "analysis": analysis_result,
-            },
-        )
+        try:
+            await manager.send_status(
+                file_id,
+                {
+                    "status": "completed",
+                    "analysis": analysis_result,
+                },
+            )
+        except Exception as e:
+            logger.debug(f"WS notify (completed) failed: {e}")
 
         logger.info("=" * 80)
         logger.info(f"✅ [PROCESS] process_analysis() complete for {file_id}")
@@ -831,7 +970,7 @@ async def process_analysis(
                 },
             )
         except Exception as ws_err:
-            logger.warning(f"WS notify (failed) failed: {ws_err}")
+            logger.debug(f"WS notify (failed) failed: {ws_err}")
 
     finally:
         db.close()

@@ -1,7 +1,7 @@
-version: '3.8'
+version: "3.8"
 
 services:
-  # Frontend Service
+  # ─── Frontend Service ──────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -18,7 +18,7 @@ services:
       - pesa-network
     restart: unless-stopped
 
-  # Backend Service
+  # ─── Backend Service ───────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
@@ -30,6 +30,12 @@ services:
       - ENV=production
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/pesa
       - REDIS_HOST=redis
+      # Elasticsearch
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_INDEX=mpesa_transactions
+      - ELASTICSEARCH_ENABLED=true
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/reports:/app/reports
@@ -37,11 +43,12 @@ services:
     depends_on:
       - postgres
       - redis
+      - elasticsearch
     networks:
       - pesa-network
     restart: unless-stopped
 
-  # PostgreSQL Database
+  # ─── PostgreSQL Database ──────────────────────────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: pesa-postgres
@@ -57,7 +64,7 @@ services:
       - pesa-network
     restart: unless-stopped
 
-  # Redis Cache
+  # ─── Redis Cache ──────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: pesa-redis
@@ -69,7 +76,45 @@ services:
       - pesa-network
     restart: unless-stopped
 
-  # Celery Worker
+  # ─── Elasticsearch ────────────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: pesa-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - pesa-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ─── Kibana (Visualization) ──────────────────────────────────────────────
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: pesa-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - pesa-network
+    restart: unless-stopped
+
+  # ─── Celery Worker ────────────────────────────────────────────────────────
   celery-worker:
     build:
       context: ./backend
@@ -81,6 +126,7 @@ services:
       - REDIS_HOST=redis
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/reports:/app/reports
@@ -88,11 +134,12 @@ services:
       - backend
       - redis
       - postgres
+      - elasticsearch
     networks:
       - pesa-network
     restart: unless-stopped
 
-  # Celery Beat (Scheduled Tasks)
+  # ─── Celery Beat (Scheduled Tasks) ──────────────────────────────────────
   celery-beat:
     build:
       context: ./backend
@@ -112,7 +159,7 @@ services:
       - pesa-network
     restart: unless-stopped
 
-  # Nginx (Optional - for production)
+  # ─── Nginx (Optional - for production) ──────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: pesa-nginx
@@ -132,6 +179,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  elasticsearch-data:
 
 networks:
   pesa-network:

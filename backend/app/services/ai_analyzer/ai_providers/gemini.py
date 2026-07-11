@@ -37,15 +37,56 @@ class GeminiProvider(AIProvider):
             transactions, statement_type, deterministic, prompt
         )
 
+        # ─── Try google.genai first (newer API) ──────────────────────────────
         try:
-            import google.generativeai as genai
+            import google.genai as genai
 
-            # Use the module directly
-            google.generativeai.configure(api_key=self.api_key)  # type: ignore
+            client = genai.Client(api_key=self.api_key)
 
             for model_name in GEMINI_MODELS:
                 try:
-                    logger.info(f"🔍 Trying Gemini model: {model_name}")
+                    logger.info(f"🔍 Trying Gemini model (genai): {model_name}")
+                    response = await asyncio.to_thread(
+                        client.models.generate_content,
+                        model=model_name,
+                        contents=full_prompt,
+                    )
+                    response_text = getattr(response, "text", None)
+                    if response_text:
+                        logger.info(f"✅ Gemini {model_name} succeeded")
+                        parsed = self._parse_json_response(response_text)
+                        if parsed:
+                            return parsed
+                        else:
+                            logger.warning(f"⚠️ Failed to parse Gemini response")
+                            continue
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "404" in error_msg or "not found" in error_msg:
+                        logger.warning(f"⚠️ Model {model_name} not found, trying next")
+                        continue
+                    elif "api_key" in error_msg or "authentication" in error_msg:
+                        logger.warning(f"⚠️ Authentication failed for Gemini: {e}")
+                        return None
+                    else:
+                        logger.warning(f"⚠️ Gemini {model_name} failed: {e}")
+                        continue
+
+        except ImportError:
+            logger.debug("google.genai not available, trying google.generativeai")
+        except Exception as e:
+            logger.warning(f"⚠️ google.genai failed: {e}")
+
+        # ─── Fallback to google.generativeai (older API) ──────────────────────
+        try:
+            import google.generativeai as genai
+
+            # ✅ FIX: Use genai.configure() directly
+            genai.configure(api_key=self.api_key)
+
+            for model_name in GEMINI_MODELS:
+                try:
+                    logger.info(f"🔍 Trying Gemini model (generativeai): {model_name}")
                     model = genai.GenerativeModel(model_name)
                     response = await asyncio.to_thread(
                         model.generate_content, full_prompt
@@ -57,7 +98,12 @@ class GeminiProvider(AIProvider):
                         continue
 
                     logger.info(f"✅ Gemini {model_name} succeeded")
-                    return self._parse_json_response(response_text)
+                    parsed = self._parse_json_response(response_text)
+                    if parsed:
+                        return parsed
+                    else:
+                        logger.warning(f"⚠️ Failed to parse Gemini response")
+                        continue
 
                 except Exception as e:
                     error_msg = str(e).lower()
@@ -65,19 +111,16 @@ class GeminiProvider(AIProvider):
                         logger.warning(f"⚠️ Model {model_name} not found, trying next")
                         continue
                     elif "api_key" in error_msg or "authentication" in error_msg:
-                        logger.error(f"⚠️ Authentication failed for Gemini: {e}")
+                        logger.warning(f"⚠️ Authentication failed for Gemini: {e}")
                         return None
                     else:
                         logger.warning(f"⚠️ Gemini {model_name} failed: {e}")
                         continue
 
         except ImportError:
-            logger.error("❌ Google Generative AI library not installed")
-            logger.info("ℹ️ Install with: pip install google-generativeai")
-            return None
+            logger.debug("google.generativeai not available")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Gemini: {e}")
-            return None
+            logger.warning(f"⚠️ google.generativeai failed: {e}")
 
         return None
 

@@ -78,13 +78,36 @@ class AIProvider(ABC):
 
     def _parse_json_response(self, text: str) -> Dict[str, Any]:
         """Parse JSON from AI response, handling markdown code blocks."""
-        clean = re.sub(r"```json\s*", "", text or "")
-        clean = re.sub(r"```\s*", "", clean).strip()
-        return json.loads(clean)
+        if not text:
+            logger.warning("Empty response received from AI provider")
+            return {}
+
+        try:
+            clean = re.sub(r"```json\s*", "", text)
+            clean = re.sub(r"```\s*", "", clean).strip()
+
+            if not clean:
+                logger.warning("No JSON content found in AI response")
+                return {}
+
+            # Try to find JSON if there's extra text around it
+            json_match = re.search(r"\{.*\}", clean, re.DOTALL)
+            if json_match:
+                clean = json_match.group(0)
+
+            return json.loads(clean)
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response: {e}")
+            logger.debug(f"Response text: {text[:500]}")
+            return {}
+        except Exception as e:
+            logger.error(f"Unexpected error parsing JSON response: {e}")
+            return {}
 
 
 class AIProviderFactory:
-    """Factory for creating AI provider instances."""
+    """Factory for creating AI provider instances with graceful failure."""
 
     def __init__(self):
         import os
@@ -101,23 +124,63 @@ class AIProviderFactory:
         self.deepseek_base_url = "https://api.deepseek.com/v1"
 
     def get_provider(self, name: str) -> Optional[AIProvider]:
-        """Get an AI provider instance by name."""
-        if name == "gemini" and self.gemini_api_key:
-            from .gemini import GeminiProvider
+        """
+        Get an AI provider instance by name.
 
-            return GeminiProvider(self.gemini_api_key, self.gemini_model)
-        elif name == "claude" and self.claude_api_key:
-            from .claude import ClaudeProvider
+        Returns None if the provider is not available or fails to initialize.
+        """
+        try:
+            if name == "gemini" and self.gemini_api_key:
+                from .gemini import GeminiProvider
 
-            return ClaudeProvider(self.claude_api_key, self.claude_model)
-        elif name == "deepseek" and self.deepseek_api_key:
-            from .deepseek import DeepSeekProvider
+                return GeminiProvider(self.gemini_api_key, self.gemini_model)
 
-            return DeepSeekProvider(
-                self.deepseek_api_key, self.deepseek_model, self.deepseek_base_url
-            )
-        elif name == "openai" and self.openai_api_key:
-            from .openai import OpenAIProvider
+            elif name == "claude" and self.claude_api_key:
+                from .claude import ClaudeProvider
 
-            return OpenAIProvider(self.openai_api_key, self.openai_model)
-        return None
+                return ClaudeProvider(self.claude_api_key, self.claude_model)
+
+            elif name == "deepseek" and self.deepseek_api_key:
+                from .deepseek import DeepSeekProvider
+
+                return DeepSeekProvider(
+                    self.deepseek_api_key, self.deepseek_model, self.deepseek_base_url
+                )
+
+            elif name == "openai" and self.openai_api_key:
+                from .openai import OpenAIProvider
+
+                return OpenAIProvider(self.openai_api_key, self.openai_model)
+
+            else:
+                if not self._has_valid_api_key(name):
+                    logger.info(f"ℹ️ {name.capitalize()} API key not configured")
+                return None
+
+        except ImportError as e:
+            logger.warning(f"⚠️ Could not import {name} provider: {e}")
+            logger.info(f"ℹ️ Install required package for {name} provider")
+            return None
+
+        except Exception as e:
+            logger.warning(f"⚠️ Could not initialize {name} provider: {e}")
+            return None
+
+    def _has_valid_api_key(self, name: str) -> bool:
+        """Check if the provider has a valid API key."""
+        key_map = {
+            "gemini": self.gemini_api_key,
+            "claude": self.claude_api_key,
+            "deepseek": self.deepseek_api_key,
+            "openai": self.openai_api_key,
+        }
+        key = key_map.get(name, "")
+        return bool(key and not key.startswith("your_"))
+
+    def get_available_providers(self) -> List[str]:
+        """Get list of available provider names."""
+        providers = []
+        for name in ["gemini", "claude", "deepseek", "openai"]:
+            if self._has_valid_api_key(name):
+                providers.append(name)
+        return providers

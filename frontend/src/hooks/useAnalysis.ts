@@ -41,7 +41,7 @@ export function useAnalysis(
     onError,
     onProgress,
     pollInterval = 5000,
-    maxWebSocketRetries = 3,
+    maxWebSocketRetries = 2,
     wsReconnectDelay = 3000,
   } = options;
 
@@ -240,18 +240,19 @@ export function useAnalysis(
       return;
     }
 
+    // Don't setup if WebSocket is disabled or already connecting
     if (!enableWebSocket || !currentAnalysisId || isConnectingRef.current) {
       return;
     }
 
+    // Check retry limit
     if (wsRetryCountRef.current >= maxWebSocketRetries) {
       console.warn(
-        `⚠️ WebSocket retry limit reached - falling back to polling`,
+        `⚠️ WebSocket retry limit reached (${maxWebSocketRetries}) - using polling`,
       );
       // Start polling once
       if (!pollTimeoutRef.current) {
         const poll = () => {
-          // ✅ STOP: Don't poll if complete
           if (!mountedRef.current || isCompleteRef.current) {
             if (pollTimeoutRef.current) {
               clearTimeout(pollTimeoutRef.current);
@@ -274,6 +275,7 @@ export function useAnalysis(
       cleanupWebSocket();
     }
 
+    // ✅ FIX: Try to get WebSocket URL with authentication
     const wsUrl = analysisService.getWebSocketUrl(currentAnalysisId);
     isConnectingRef.current = true;
 
@@ -281,10 +283,15 @@ export function useAnalysis(
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
+      // Set a connection timeout
       const connectionTimeout = setTimeout(() => {
         if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
           console.warn("⚠️ WebSocket connection timeout");
-          wsRef.current.close();
+          try {
+            wsRef.current.close();
+          } catch (e) {
+            // Ignore
+          }
           wsRetryCountRef.current += 1;
           isConnectingRef.current = false;
           // Start polling on timeout
@@ -382,13 +389,15 @@ export function useAnalysis(
         }
       };
 
-      ws.onerror = () => {
+      // ✅ FIX: Handle errors gracefully - don't retry immediately
+      ws.onerror = (event) => {
         clearTimeout(connectionTimeout);
         if (!mountedRef.current) return;
+        console.warn("⚠️ WebSocket error:", event);
         setWsConnected(false);
         isConnectingRef.current = false;
         wsRetryCountRef.current += 1;
-        // Don't reconnect immediately - use exponential backoff
+        // Use exponential backoff for reconnection
         if (!isCompleteRef.current) {
           attemptReconnect();
         }
@@ -397,11 +406,16 @@ export function useAnalysis(
       ws.onclose = (event) => {
         clearTimeout(connectionTimeout);
         if (!mountedRef.current) return;
+        console.log(`🔌 WebSocket closed: ${event.code} - ${event.reason}`);
         setWsConnected(false);
         isConnectingRef.current = false;
+        // Don't reconnect for normal closure or if complete
         if (event.code !== 1000 && !isCompleteRef.current) {
           wsRetryCountRef.current += 1;
           attemptReconnect();
+        } else if (event.code === 1000) {
+          // Normal closure - don't retry
+          console.log("WebSocket closed normally");
         }
       };
     } catch (err) {
@@ -474,7 +488,7 @@ export function useAnalysis(
       wsReconnectDelay * Math.pow(2, wsRetryCountRef.current),
     );
     console.log(
-      `🔄 Reconnecting in ${delay}ms (attempt ${wsRetryCountRef.current})`,
+      `🔄 Reconnecting in ${delay}ms (attempt ${wsRetryCountRef.current + 1}/${maxWebSocketRetries})`,
     );
 
     reconnectTimeoutRef.current = setTimeout(() => {
