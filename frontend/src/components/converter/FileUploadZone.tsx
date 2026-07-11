@@ -1,7 +1,6 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import Dexie, { type Table } from "dexie";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowRight,
@@ -22,41 +21,22 @@ import {
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { useDropzone } from "react-dropzone";
+import { FileRejection, useDropzone } from "react-dropzone";
 import { toast } from "sonner";
-import { Badge } from "./ui/badge";
-import { Button } from "./ui/button";
-import { Card } from "./ui/card";
-import { Input } from "./ui/input";
-import { Label } from "./ui/label";
-import { Progress } from "./ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Card } from "../ui/card";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { Progress } from "../ui/progress";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 
-// ─── Dexie DB ─────────────────────────────────────────────────────────────────
-interface FileRecord {
-  fileId: string;
-  fileName: string;
-  uploadedAt: string;
-  mode?: "analysis" | "conversion";
-  conversionFormat?: string;
-  transactionCount?: number;
-  totalAmount?: number;
-  status?: string;
-}
-
-class PesaDB extends Dexie {
-  files!: Table<FileRecord>;
-  conversions!: Table<FileRecord>;
-  constructor() {
-    super("PesaAnalyserDB");
-    this.version(2).stores({
-      files: "fileId, uploadedAt, mode",
-      conversions: "fileId, uploadedAt, mode, conversionFormat",
-    });
-  }
-}
-
-const db = new PesaDB();
+// ─── Import Conversion Service ──────────────────────────────────────────────
+import {
+  conversionService,
+  type ConversionHistoryItem,
+  type ConversionResponse,
+} from "@/services/conversionService";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -97,14 +77,6 @@ function getFileType(filename: string): keyof typeof FILE_TYPES | null {
   return null;
 }
 
-function validateFile(file: File): string | null {
-  if (!VALID_EXTENSIONS.includes(getFileExtension(file.name)))
-    return "Invalid file type. Please upload a PDF, CSV, or Excel file.";
-  if (file.size > MAX_FILE_SIZE)
-    return "File is too large. Maximum size is 50 MB.";
-  return null;
-}
-
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -121,51 +93,25 @@ function formatDate(dateString: string): string {
   });
 }
 
-// ─── PDF Encryption Check ────────────────────────────────────────────────────
-async function isPdfEncrypted(file: File): Promise<boolean> {
-  try {
-    const { PDFDocument } = await import("pdf-lib");
-    const buffer = await file.arrayBuffer();
-    await PDFDocument.load(buffer, { ignoreEncryption: false });
-    return false;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message.toLowerCase() : "";
-    if (
-      msg.includes("encrypt") ||
-      msg.includes("password") ||
-      msg.includes("decrypt")
-    ) {
-      return true;
-    }
-    return false;
-  }
-}
-
 // ─── Types ────────────────────────────────────────────────────────────────────
-type UploadMode = "analysis" | "conversion" | "both";
-
-interface UploadZoneProps {
-  mode?: UploadMode;
-  onUploadComplete?: (fileId: string) => void;
-  onConvertComplete?: (fileId: string, format: string) => void;
+interface FileUploadZoneProps {
+  onFilesUploaded?: (files: File[]) => void;
+  onConvert?: (format: string, result: ConversionResponse) => void;
+  isConverting?: boolean;
+  progress?: number;
   multiple?: boolean;
   maxFiles?: number;
-  showHistory?: boolean;
-  title?: string;
-  description?: string;
   accept?: Record<string, string[]>;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export function UploadZone({
-  mode = "analysis",
-  onUploadComplete,
-  onConvertComplete,
-  multiple = false,
-  maxFiles = 1,
-  showHistory = true,
-  title,
-  description,
+export function FileUploadZone({
+  onFilesUploaded,
+  onConvert,
+  isConverting = false,
+  progress = 0,
+  multiple = true,
+  maxFiles = 10,
   accept = {
     "application/pdf": [".pdf"],
     "text/csv": [".csv"],
@@ -174,7 +120,7 @@ export function UploadZone({
       ".xlsx",
     ],
   },
-}: UploadZoneProps) {
+}: FileUploadZoneProps) {
   const { data: session, status } = useSession();
   const router = useRouter();
 
@@ -189,45 +135,58 @@ export function UploadZone({
   const [conversionFormat, setConversionFormat] = useState<"csv" | "excel">(
     "csv",
   );
-  const [conversionHistory, setConversionHistory] = useState<any[]>([]);
-  const [analysisHistory, setAnalysisHistory] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<"upload" | "history">("upload");
+  const [conversionHistory, setConversionHistory] = useState<
+    ConversionHistoryItem[]
+  >([]);
+  const [conversionResult, setConversionResult] =
+    useState<ConversionResponse | null>(null);
 
-  // ─── Load history ──────────────────────────────────────────────────────────
+  // ─── Load conversion history ──────────────────────────────────────────────
   useEffect(() => {
-    if (showHistory) {
-      loadHistory();
-    }
-  }, [mode]);
+    loadConversionHistory();
+  }, []);
 
-  const loadHistory = async () => {
+  const loadConversionHistory = async () => {
     try {
-      if (mode === "conversion" || mode === "both") {
-        const conversions = await db.conversions
-          .where("mode")
-          .equals("conversion")
-          .toArray();
-        setConversionHistory(conversions.reverse().slice(0, 20));
-      }
-      if (mode === "analysis" || mode === "both") {
-        const analyses = await db.files
-          .where("mode")
-          .equals("analysis")
-          .toArray();
-        setAnalysisHistory(analyses.reverse().slice(0, 20));
-      }
+      // Try to get from API first, falls back to localStorage
+      const response = await conversionService.getHistory(0, 20);
+      setConversionHistory(response.conversions);
     } catch (error) {
-      console.error("Failed to load history:", error);
+      console.error("Failed to load conversion history:", error);
+      // Fallback to local history
+      const localHistory = conversionService.getLocalHistory();
+      const historyItems: ConversionHistoryItem[] = localHistory.map(
+        (record) => ({
+          id: record.fileId,
+          file_name: record.fileName,
+          file_count: 1,
+          transaction_count: record.transactionCount || 0,
+          total_amount: record.totalAmount || 0,
+          payment_amount: 0, // Default value for local history
+          status: "completed",
+          created_at: record.uploadedAt,
+        }),
+      );
+      setConversionHistory(historyItems);
     }
   };
 
   // ─── Dropzone ─────────────────────────────────────────────────────────────
   const onDrop = useCallback(
-    async (acceptedFiles: File[]) => {
+    async (acceptedFiles: File[], rejectedFiles: FileRejection[]) => {
       if (!session) {
-        toast.error("Please sign in to upload statements.");
+        toast.error("Please sign in to convert statements.");
         router.push("/auth/signin");
         return;
+      }
+
+      // Handle rejected files
+      if (rejectedFiles.length > 0) {
+        rejectedFiles.forEach(({ file, errors }) => {
+          errors.forEach((error) => {
+            toast.error(`${file.name}: ${error.message}`);
+          });
+        });
       }
 
       if (!multiple && acceptedFiles.length > 1) {
@@ -240,25 +199,18 @@ export function UploadZone({
         return;
       }
 
-      const validFiles: File[] = [];
-      const errors: string[] = [];
+      // Validate files using the service
+      const { valid, invalid } = conversionService.validateFiles(acceptedFiles);
 
-      for (const file of acceptedFiles) {
-        const validationError = validateFile(file);
-        if (validationError) {
-          errors.push(`${file.name}: ${validationError}`);
-        } else {
-          validFiles.push(file);
-        }
+      if (invalid.length > 0) {
+        invalid.forEach(({ file, error }) => {
+          toast.error(`${file.name}: ${error}`);
+        });
       }
 
-      if (errors.length > 0) {
-        toast.error(errors.join("\n"));
-      }
+      if (valid.length === 0) return;
 
-      if (validFiles.length === 0) return;
-
-      setFiles(validFiles);
+      setFiles(valid);
       setPassword("");
       setUploadError(null);
       setUploadProgress(0);
@@ -266,32 +218,36 @@ export function UploadZone({
       setIsPasswordProtected(false);
       setPasswordAttempts(0);
 
-      // Check encryption for PDFs
-      const pdfFiles = validFiles.filter(
-        (f) => getFileExtension(f.name) === ".pdf",
-      );
-      if (pdfFiles.length > 0 && pdfFiles.length === validFiles.length) {
+      // Call the callback with valid files
+      if (onFilesUploaded) {
+        onFilesUploaded(valid);
+      }
+
+      // Check encryption for PDFs using the service
+      const pdfFiles = valid.filter((f) => getFileExtension(f.name) === ".pdf");
+      if (pdfFiles.length > 0 && pdfFiles.length === valid.length) {
         setIsCheckingEncryption(true);
         try {
-          const encrypted = await isPdfEncrypted(pdfFiles[0]);
+          const encrypted = await conversionService.isPdfEncrypted(pdfFiles[0]);
           setIsPasswordProtected(encrypted);
           if (encrypted) {
             toast.warning(
               "🔒 PDF is password protected. Enter the password below.",
             );
           } else {
-            toast.success(`${validFiles.length} file(s) ready.`);
+            toast.success(`${valid.length} file(s) ready for conversion.`);
           }
         } catch (err) {
           console.error("Encryption check failed:", err);
+          toast.error("Failed to check PDF encryption. Please try again.");
         } finally {
           setIsCheckingEncryption(false);
         }
       } else {
-        toast.success(`${validFiles.length} file(s) ready.`);
+        toast.success(`${valid.length} file(s) ready for conversion.`);
       }
     },
-    [session, router, multiple, maxFiles],
+    [session, router, multiple, maxFiles, onFilesUploaded],
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -329,115 +285,7 @@ export function UploadZone({
     setIsCheckingEncryption(false);
   };
 
-  // ── Get token from session ───────────────────────────────────────────────
-  const getAuthToken = useCallback(() => {
-    if (session?.accessToken) {
-      return session.accessToken;
-    }
-    if (typeof window !== "undefined") {
-      const localToken = localStorage.getItem("accessToken");
-      if (localToken) return localToken;
-    }
-    return null;
-  }, [session]);
-
-  // ── Handle Upload (Analysis mode) ──────────────────────────────────────
-  const handleUpload = async () => {
-    if (files.length === 0) {
-      toast.error("Please select a file to upload.");
-      return;
-    }
-
-    if (isPasswordProtected && !password.trim()) {
-      toast.error("Please enter the PDF password to continue.");
-      return;
-    }
-
-    setIsUploading(true);
-    setUploadError(null);
-    setUploadProgress(0);
-
-    const interval = setInterval(() => {
-      setUploadProgress((prev) => (prev >= 90 ? prev : prev + 5));
-    }, 500);
-
-    try {
-      const formData = new FormData();
-      files.forEach((file) => {
-        formData.append("file", file);
-      });
-      if (password) formData.append("password", password);
-      formData.append("mode", mode);
-
-      const token = getAuthToken();
-      const headers: HeadersInit = {};
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
-      const response = await fetch("/api/upload", {
-        method: "POST",
-        headers,
-        body: formData,
-        credentials: "include",
-      });
-
-      const data = await response.json();
-      clearInterval(interval);
-
-      if (response.status === 401) {
-        setUploadProgress(0);
-        setUploadError("Authentication required. Please sign in again.");
-        toast.error("Your session has expired. Please sign in again.");
-        setTimeout(() => router.push("/auth/signin"), 2000);
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          data?.error ?? data?.message ?? `Upload failed (${response.status})`,
-        );
-      }
-
-      setUploadProgress(100);
-      toast.success(`Upload complete! ${files.length} file(s) uploaded.`);
-
-      // Store in DB
-      for (const file of files) {
-        await db.files.put({
-          fileId: data.fileId || `file_${Date.now()}`,
-          fileName: file.name,
-          uploadedAt: new Date().toISOString(),
-          mode: "analysis",
-          status: "completed",
-        });
-      }
-      await loadHistory();
-
-      if (onUploadComplete) {
-        setTimeout(() => {
-          onUploadComplete(data.fileId);
-        }, 500);
-      }
-
-      setTimeout(() => {
-        clearAll();
-      }, 2000);
-    } catch (error) {
-      clearInterval(interval);
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Upload failed. Please try again.";
-      setUploadError(message);
-      setUploadProgress(0);
-      toast.error(message);
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  // ─── Handle Convert (Conversion mode) ──────────────────────────────────
+  // ── Handle Convert ──────────────────────────────────────────────────────
   const handleConvert = async () => {
     if (files.length === 0) {
       toast.error("Please select a file to convert.");
@@ -453,95 +301,109 @@ export function UploadZone({
     setUploadError(null);
     setUploadProgress(0);
 
+    // Simulate progress
     const interval = setInterval(() => {
       setUploadProgress((prev) => (prev >= 90 ? prev : prev + 5));
     }, 300);
 
     try {
-      const formData = new FormData();
-      files.forEach((file) => {
-        formData.append("files", file);
-      });
-      formData.append("format", conversionFormat);
-      if (password) formData.append("password", password);
-      formData.append("mode", "conversion");
+      // Use the conversion service
+      const result = await conversionService.convertFiles(
+        files,
+        conversionFormat,
+        password || undefined,
+      );
 
-      const token = getAuthToken();
-      const headers: HeadersInit = {};
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
-      const response = await fetch("/api/converter/convert", {
-        method: "POST",
-        headers,
-        body: formData,
-        credentials: "include",
-      });
-
-      const data = await response.json();
       clearInterval(interval);
-
-      if (response.status === 401) {
-        setUploadProgress(0);
-        setUploadError("Authentication required. Please sign in again.");
-        toast.error("Your session has expired. Please sign in again.");
-        setTimeout(() => router.push("/auth/signin"), 2000);
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          data?.error ??
-            data?.message ??
-            `Conversion failed (${response.status})`,
-        );
-      }
-
       setUploadProgress(100);
+      setConversionResult(result);
+
       toast.success(
         `Conversion complete! ${files.length} file(s) converted to ${conversionFormat.toUpperCase()}`,
       );
 
-      // Store in DB
-      for (const file of files) {
-        await db.conversions.put({
-          fileId: data.conversion_id || `conv_${Date.now()}`,
-          fileName: file.name,
-          uploadedAt: new Date().toISOString(),
-          mode: "conversion",
-          conversionFormat: conversionFormat,
-          transactionCount: data.transactionCount || 0,
-          totalAmount: data.totalAmount || 0,
-          status: "completed",
-        });
-      }
-      await loadHistory();
+      // Reload history
+      await loadConversionHistory();
 
-      if (onConvertComplete) {
-        setTimeout(() => {
-          onConvertComplete(data.conversion_id, conversionFormat);
-        }, 500);
+      // Call the onConvert callback with result
+      if (onConvert) {
+        onConvert(conversionFormat, result);
+      }
+
+      // Auto-download if single file
+      if (files.length === 1 && result.conversion_id) {
+        try {
+          const { blob, filename } =
+            await conversionService.downloadConversionWithFilename(
+              result.conversion_id,
+            );
+
+          // Create download link
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+
+          toast.success("File downloaded automatically!");
+        } catch (downloadError) {
+          console.error("Auto-download failed:", downloadError);
+          toast.warning(
+            "Conversion complete. Click download button to get your file.",
+          );
+        }
       }
 
       setTimeout(() => {
         clearAll();
-      }, 2000);
-    } catch (error) {
+      }, 3000);
+    } catch (error: any) {
       clearInterval(interval);
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Conversion failed. Please try again.";
+      const message = error?.message || "Conversion failed. Please try again.";
       setUploadError(message);
       setUploadProgress(0);
-      toast.error(message);
+
+      // Handle specific error codes
+      if (error?.code === "UNAUTHORIZED") {
+        toast.error("Your session has expired. Please sign in again.");
+        setTimeout(() => router.push("/auth/signin"), 2000);
+      } else if (error?.code === "EXPIRED") {
+        toast.error("This conversion has expired. Please try again.");
+      } else {
+        toast.error(message);
+      }
     } finally {
       setIsUploading(false);
     }
   };
 
-  // ─── Get file icon ──────────────────────────────────────────────────────
+  // ── Handle Download ─────────────────────────────────────────────────────
+  const handleDownload = async (conversionId: string, fileName: string) => {
+    try {
+      const { blob, filename } =
+        await conversionService.downloadConversionWithFilename(conversionId);
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename || fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.success("File downloaded successfully!");
+    } catch (error: any) {
+      const message = error?.message || "Download failed. Please try again.";
+      toast.error(message);
+      console.error("Download error:", error);
+    }
+  };
+
+  // ── Get file icon ──────────────────────────────────────────────────────
   const getFileIcon = (fileName: string) => {
     const type = getFileType(fileName);
     if (type) return FILE_TYPES[type].icon;
@@ -562,23 +424,13 @@ export function UploadZone({
 
   // ─── Progress label ─────────────────────────────────────────────────────
   const progressLabel =
-    mode === "conversion"
-      ? uploadProgress < 30
-        ? "📄 Parsing your document(s)..."
-        : uploadProgress < 60
-          ? "🔄 Extracting transactions..."
-          : uploadProgress < 90
-            ? "📊 Formatting output..."
-            : "✨ Almost done..."
-      : uploadProgress < 30
-        ? "📄 Parsing your document..."
-        : uploadProgress < 60
-          ? "🧠 AI is analysing transactions..."
-          : uploadProgress < 90
-            ? "📊 Generating insights..."
-            : "✨ Almost done...";
-
-  const isConversionMode = mode === "conversion" || mode === "both";
+    uploadProgress < 30
+      ? "📄 Parsing your document(s)..."
+      : uploadProgress < 60
+        ? "🔄 Extracting transactions..."
+        : uploadProgress < 90
+          ? "📊 Formatting output..."
+          : "✨ Almost done...";
 
   // ─── Unauthenticated ───────────────────────────────────────────────────────
   if (!session && status !== "loading") {
@@ -589,15 +441,9 @@ export function UploadZone({
             <Sparkles className="h-8 w-8 text-primary" />
           </div>
           <div>
-            <h3 className="text-lg font-semibold">
-              Sign In to {isConversionMode ? "Convert" : "Upload"}
-            </h3>
+            <h3 className="text-lg font-semibold">Sign In to Convert</h3>
             <p className="text-sm text-muted-foreground">
-              Create an account or sign in to{" "}
-              {isConversionMode
-                ? "convert your statements"
-                : "analyse your statements"}
-              .
+              Create an account or sign in to convert your statements.
             </p>
           </div>
           <Button onClick={() => router.push("/auth/signin")} className="gap-2">
@@ -623,31 +469,17 @@ export function UploadZone({
   // ─── Main ──────────────────────────────────────────────────────────────────
   return (
     <div className="w-full max-w-4xl mx-auto">
-      <Tabs
-        value={activeTab}
-        onValueChange={(v) => setActiveTab(v as "upload" | "history")}
-        className="space-y-4"
-      >
-        <div className="flex items-center justify-between">
-          <TabsList>
-            <TabsTrigger value="upload" className="flex items-center gap-2">
-              <Upload className="h-4 w-4" />
-              {isConversionMode ? "Upload & Convert" : "Upload"}
-            </TabsTrigger>
-            {showHistory && (
-              <TabsTrigger value="history" className="flex items-center gap-2">
-                <Clock className="h-4 w-4" />
-                History (
-                {isConversionMode
-                  ? conversionHistory.length
-                  : analysisHistory.length}
-                )
-              </TabsTrigger>
-            )}
-          </TabsList>
-
-          {title && <h2 className="text-xl font-semibold">{title}</h2>}
-        </div>
+      <Tabs defaultValue="upload" className="space-y-4">
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="upload" className="flex items-center gap-2">
+            <Upload className="h-4 w-4" />
+            Upload & Convert
+          </TabsTrigger>
+          <TabsTrigger value="history" className="flex items-center gap-2">
+            <Clock className="h-4 w-4" />
+            History ({conversionHistory.length})
+          </TabsTrigger>
+        </TabsList>
 
         <TabsContent value="upload">
           <motion.div
@@ -655,6 +487,7 @@ export function UploadZone({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
           >
+            {/* ─── Drop zone ── */}
             <Card className="overflow-hidden">
               <div
                 {...getRootProps()}
@@ -673,6 +506,7 @@ export function UploadZone({
 
                 <AnimatePresence mode="wait">
                   {files.length === 0 ? (
+                    /* ── Empty state ── */
                     <motion.div
                       key="empty"
                       initial={{ opacity: 0 }}
@@ -692,10 +526,7 @@ export function UploadZone({
                         <h3 className="text-lg font-semibold">
                           {isDragActive
                             ? "Drop your files here"
-                            : description ||
-                              (isConversionMode
-                                ? "Drop your statements here"
-                                : "Upload your statement")}
+                            : "Drop your statements here"}
                         </h3>
                         <p className="text-sm text-muted-foreground">
                           Drag & drop or click to select PDF, CSV, or Excel
@@ -725,6 +556,7 @@ export function UploadZone({
                       </div>
                     </motion.div>
                   ) : (
+                    /* ── Files selected state ── */
                     <motion.div
                       key="selected"
                       initial={{ opacity: 0, scale: 0.9 }}
@@ -831,8 +663,7 @@ export function UploadZone({
                           (f) => getFileExtension(f.name) === ".pdf",
                         ) && (
                           <p className="text-sm text-green-600 dark:text-green-400 text-center">
-                            ✅ PDFs are unlocked and ready to{" "}
-                            {isConversionMode ? "convert" : "upload"}
+                            ✅ PDFs are unlocked and ready to convert
                           </p>
                         )}
                     </motion.div>
@@ -841,6 +672,7 @@ export function UploadZone({
               </div>
             </Card>
 
+            {/* ─── Controls ── */}
             <AnimatePresence>
               {files.length > 0 && !isCheckingEncryption && (
                 <motion.div
@@ -849,6 +681,7 @@ export function UploadZone({
                   exit={{ opacity: 0, y: 10 }}
                   className="mt-4 space-y-4"
                 >
+                  {/* Password input for encrypted PDFs */}
                   {isPasswordProtected && (
                     <div className="flex flex-col gap-2 max-w-md mx-auto">
                       <div className="flex items-center gap-2">
@@ -891,23 +724,19 @@ export function UploadZone({
                               password.trim() &&
                               !isUploading
                             ) {
-                              isConversionMode
-                                ? handleConvert()
-                                : handleUpload();
+                              handleConvert();
                             }
                           }}
                           autoFocus
                         />
                         <Button
-                          onClick={
-                            isConversionMode ? handleConvert : handleUpload
-                          }
+                          onClick={handleConvert}
                           disabled={!password.trim() || isUploading}
                         >
                           {isUploading ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                           ) : (
-                            "Unlock & Continue"
+                            "Unlock & Convert"
                           )}
                         </Button>
                       </div>
@@ -921,58 +750,51 @@ export function UploadZone({
                     </div>
                   )}
 
+                  {/* Format selection and convert button */}
                   {!isPasswordProtected && (
                     <div className="flex flex-wrap items-center justify-center gap-3">
-                      {isConversionMode && (
-                        <div className="flex gap-1 bg-muted p-1 rounded-md">
-                          <Button
-                            onClick={() => setConversionFormat("csv")}
-                            variant={
-                              conversionFormat === "csv" ? "default" : "ghost"
-                            }
-                            size="sm"
-                            disabled={isUploading}
-                            className="transition-all"
-                          >
-                            <FileJson className="h-4 w-4 mr-1" />
-                            CSV
-                          </Button>
-                          <Button
-                            onClick={() => setConversionFormat("excel")}
-                            variant={
-                              conversionFormat === "excel" ? "default" : "ghost"
-                            }
-                            size="sm"
-                            disabled={isUploading}
-                            className="transition-all"
-                          >
-                            <FileSpreadsheet className="h-4 w-4 mr-1" />
-                            Excel
-                          </Button>
-                        </div>
-                      )}
+                      <div className="flex gap-1 bg-muted p-1 rounded-md">
+                        <Button
+                          onClick={() => setConversionFormat("csv")}
+                          variant={
+                            conversionFormat === "csv" ? "default" : "ghost"
+                          }
+                          size="sm"
+                          disabled={isUploading}
+                          className="transition-all"
+                        >
+                          <FileJson className="h-4 w-4 mr-1" />
+                          CSV
+                        </Button>
+                        <Button
+                          onClick={() => setConversionFormat("excel")}
+                          variant={
+                            conversionFormat === "excel" ? "default" : "ghost"
+                          }
+                          size="sm"
+                          disabled={isUploading}
+                          className="transition-all"
+                        >
+                          <FileSpreadsheet className="h-4 w-4 mr-1" />
+                          Excel
+                        </Button>
+                      </div>
 
                       <Button
-                        onClick={
-                          isConversionMode ? handleConvert : handleUpload
-                        }
+                        onClick={handleConvert}
                         disabled={isUploading || files.length === 0}
                         className="min-w-[200px] gap-2 group"
                       >
                         {isUploading ? (
                           <span className="flex items-center gap-2">
                             <Loader2 className="h-4 w-4 animate-spin" />
-                            {isConversionMode
-                              ? "Converting…"
-                              : "Uploading…"}{" "}
-                            {uploadProgress}%
+                            Converting… {uploadProgress}%
                           </span>
                         ) : (
                           <>
                             <Zap className="h-4 w-4 group-hover:rotate-12 transition-transform" />
-                            {isConversionMode
-                              ? `Convert ${files.length} File${files.length > 1 ? "s" : ""}`
-                              : `Analyse ${files.length} File${files.length > 1 ? "s" : ""}`}
+                            Convert {files.length} File
+                            {files.length > 1 ? "s" : ""}
                           </>
                         )}
                       </Button>
@@ -987,6 +809,7 @@ export function UploadZone({
                     </div>
                   )}
 
+                  {/* Progress bar */}
                   {isUploading && (
                     <div className="max-w-md mx-auto">
                       <Progress value={uploadProgress} className="h-2" />
@@ -996,6 +819,7 @@ export function UploadZone({
                     </div>
                   )}
 
+                  {/* Error message */}
                   {uploadError && !isPasswordProtected && (
                     <p className="text-sm text-red-500 text-center">
                       {uploadError}
@@ -1007,116 +831,102 @@ export function UploadZone({
           </motion.div>
         </TabsContent>
 
-        {showHistory && (
-          <TabsContent value="history">
-            <Card>
-              <Card className="p-4">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold">
-                    {isConversionMode
-                      ? "Conversion History"
-                      : "Analysis History"}
-                  </h3>
-                  <Button variant="ghost" size="sm" onClick={loadHistory}>
-                    <Clock className="h-4 w-4 mr-2" />
-                    Refresh
-                  </Button>
-                </div>
+        {/* ─── History Tab ────────────────────────────────────────────────── */}
+        <TabsContent value="history">
+          <Card>
+            <Card className="p-4">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold">Conversion History</h3>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={loadConversionHistory}
+                >
+                  <Clock className="h-4 w-4 mr-2" />
+                  Refresh
+                </Button>
+              </div>
 
-                {(() => {
-                  const history = isConversionMode
-                    ? conversionHistory
-                    : analysisHistory;
-                  if (history.length === 0) {
-                    return (
-                      <div className="text-center py-8 text-muted-foreground">
-                        <FileText className="h-12 w-12 mx-auto opacity-50 mb-2" />
-                        <p>
-                          No {isConversionMode ? "conversion" : "analysis"}{" "}
-                          history yet
-                        </p>
-                        <p className="text-sm">
-                          {isConversionMode ? "Convert" : "Upload"} your first
-                          statement to see history here
-                        </p>
-                      </div>
-                    );
-                  }
-                  return (
-                    <div className="space-y-2 max-h-96 overflow-y-auto">
-                      {history.map((record) => (
-                        <div
-                          key={record.fileId}
-                          className="flex items-center justify-between p-3 hover:bg-muted rounded-lg transition-colors border"
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className="p-2 rounded-lg bg-primary/5">
-                              <FileText className="h-4 w-4 text-primary" />
-                            </div>
-                            <div className="min-w-0">
-                              <p className="text-sm font-medium truncate">
-                                {record.fileName}
-                              </p>
-                              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                <span>{formatDate(record.uploadedAt)}</span>
-                                {isConversionMode &&
-                                  record.conversionFormat && (
-                                    <>
-                                      <span>•</span>
-                                      <Badge
-                                        variant="outline"
-                                        className="text-xs"
-                                      >
-                                        {record.conversionFormat?.toUpperCase()}
-                                      </Badge>
-                                    </>
-                                  )}
-                                {record.transactionCount && (
-                                  <>
-                                    <span>•</span>
-                                    <span>
-                                      {record.transactionCount} transactions
-                                    </span>
-                                  </>
-                                )}
-                                {record.status && (
-                                  <>
-                                    <span>•</span>
-                                    <Badge
-                                      className={cn(
-                                        "text-xs",
-                                        record.status === "completed"
-                                          ? "bg-green-500/10 text-green-600"
-                                          : "bg-yellow-500/10 text-yellow-600",
-                                      )}
-                                    >
-                                      {record.status}
-                                    </Badge>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-primary"
-                          >
-                            <Download className="h-4 w-4" />
-                          </Button>
+              {conversionHistory.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <FileText className="h-12 w-12 mx-auto opacity-50 mb-2" />
+                  <p>No conversion history yet</p>
+                  <p className="text-sm">
+                    Convert your first statement to see history here
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {conversionHistory.map((record) => (
+                    <div
+                      key={record.id}
+                      className="flex items-center justify-between p-3 hover:bg-muted rounded-lg transition-colors border"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="p-2 rounded-lg bg-primary/5">
+                          <FileText className="h-4 w-4 text-primary" />
                         </div>
-                      ))}
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">
+                            {record.file_name}
+                          </p>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <span>
+                              {formatDate(
+                                record.created_at || new Date().toISOString(),
+                              )}
+                            </span>
+                            <span>•</span>
+                            <Badge variant="outline" className="text-xs">
+                              {record.status}
+                            </Badge>
+                            {record.transaction_count > 0 && (
+                              <>
+                                <span>•</span>
+                                <span>
+                                  {record.transaction_count} transactions
+                                </span>
+                              </>
+                            )}
+                            {record.total_amount !== 0 && (
+                              <>
+                                <span>•</span>
+                                <span>
+                                  KES {record.total_amount.toFixed(2)}
+                                </span>
+                              </>
+                            )}
+                            {record.payment_amount !== undefined &&
+                              record.payment_amount > 0 && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-primary">
+                                    Paid: KES {record.payment_amount.toFixed(2)}
+                                  </span>
+                                </>
+                              )}
+                          </div>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-primary"
+                        onClick={() =>
+                          handleDownload(record.id, record.file_name)
+                        }
+                        disabled={record.status !== "completed"}
+                      >
+                        <Download className="h-4 w-4" />
+                      </Button>
                     </div>
-                  );
-                })()}
-              </Card>
+                  ))}
+                </div>
+              )}
             </Card>
-          </TabsContent>
-        )}
+          </Card>
+        </TabsContent>
       </Tabs>
     </div>
   );
 }
-
-// ─── Export both as UploadZone and default ──────────────────────────────────
-export default UploadZone;

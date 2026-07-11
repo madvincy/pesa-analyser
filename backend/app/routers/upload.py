@@ -118,9 +118,21 @@ async def index_analysis_to_elasticsearch(
 
     try:
         # Connect if not already connected
-        if not hasattr(elasticsearch_service, "_connected"):
+        if (
+            not hasattr(elasticsearch_service, "_connected")
+            or not elasticsearch_service._connected
+        ):
+            logger.info("🔌 Connecting to Elasticsearch for indexing...")
             await elasticsearch_service.connect()
-            elasticsearch_service._connected = True
+            if elasticsearch_service.is_connected():
+                logger.info("✅ Connected to Elasticsearch successfully")
+            else:
+                logger.warning("⚠️ Failed to connect to Elasticsearch for indexing")
+                return
+
+        if not elasticsearch_service.is_connected():
+            logger.warning("⚠️ Cannot index: Elasticsearch not connected")
+            return
 
         # Prepare document for indexing
         document = {
@@ -131,13 +143,15 @@ async def index_analysis_to_elasticsearch(
             "upload_date": datetime.now().isoformat(),
             "statement_type": analysis_result.get("statement_type", "unknown"),
             "transaction_count": len(transactions),
-            "total_income": analysis_result.get("total_income", 0),
-            "total_expenses": analysis_result.get("total_expenses", 0),
-            "net_cash_flow": analysis_result.get("net_cash_flow", 0),
-            "health_score": analysis_result.get("health_score", 0),
+            "total_income": float(analysis_result.get("total_income", 0)),
+            "total_expenses": float(analysis_result.get("total_expenses", 0)),
+            "net_cash_flow": float(analysis_result.get("net_cash_flow", 0)),
+            "health_score": int(analysis_result.get("health_score", 0)),
             "transactions": transactions[:1000],  # Limit for ES
             "categories": [
-                c.get("name") for c in analysis_result.get("category_data", [])
+                c.get("name")
+                for c in analysis_result.get("category_data", [])
+                if c.get("name")
             ],
             "merchants": list(
                 set(
@@ -171,11 +185,20 @@ async def index_analysis_to_elasticsearch(
 
         logger.info(f"✅ Indexed analysis {file_id} to Elasticsearch")
 
+        # Verify count
+        try:
+            count = await elasticsearch_service.client.count(
+                index=elasticsearch_service.index_name
+            )
+            logger.info(f"📊 Total documents in Elasticsearch: {count['count']}")
+        except Exception as e:
+            logger.debug(f"Could not get count: {e}")
+
     except ImportError as e:
         logger.debug(f"Elasticsearch import error: {e}")
     except Exception as e:
         # Non-blocking - just log the error
-        logger.debug(f"⚠️ Failed to index to Elasticsearch: {e}")
+        logger.error(f"❌ Failed to index to Elasticsearch: {e}", exc_info=True)
 
 
 # ─── Staged analysis persistence ────────────────────────────────────────────
@@ -711,6 +734,7 @@ async def upload_statement(
 
                 # ✅ Index to Elasticsearch (non-blocking)
                 try:
+                    logger.info(f"📤 Indexing analysis {file_id} to Elasticsearch...")
                     await index_analysis_to_elasticsearch(
                         file_id=file_id,
                         user_id=str(user_id),
@@ -719,7 +743,7 @@ async def upload_statement(
                         analysis_result=analysis_result,
                     )
                 except Exception as e:
-                    logger.debug(f"Elasticsearch indexing skipped: {e}")
+                    logger.error(f"❌ Elasticsearch indexing error: {e}", exc_info=True)
 
                 # Clean up temp file
                 if os.path.exists(temp_path):
@@ -922,6 +946,7 @@ async def process_analysis(
 
         # ✅ Index to Elasticsearch (non-blocking)
         try:
+            logger.info(f"📤 Indexing analysis {file_id} to Elasticsearch...")
             await index_analysis_to_elasticsearch(
                 file_id=file_id,
                 user_id=str(analysis.user_id),
@@ -930,7 +955,7 @@ async def process_analysis(
                 analysis_result=analysis_result,
             )
         except Exception as e:
-            logger.debug(f"Elasticsearch indexing skipped: {e}")
+            logger.error(f"❌ Elasticsearch indexing error: {e}", exc_info=True)
 
         # ─── Notify WebSocket Clients ────────────────────────────────────────
         try:
