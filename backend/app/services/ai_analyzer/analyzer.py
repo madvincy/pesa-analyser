@@ -102,21 +102,20 @@ Be specific — mention actual amounts and merchants from the data.
         self, transactions: List[Dict[str, Any]], statement_type: str = "unknown"
     ) -> Dict[str, Any]:
         """
-        Analyze pre-parsed transactions directly.
+                Analyze pre-parsed transactions directly.
 
-        Args:
-            transactions: List of transaction dictionaries
-            statement_type: Type of statement
-
-        Returns:
-            Dictionary with complete analysis results
+                Args:
+                    transactions: List of transaction dictionaries
+                    statement_type: Type of statement
+        -
+                Returns:
+                    Dictionary with complete analysis results
         """
         if not transactions:
             logger.warning("⚠️ No transactions provided")
             return self._empty_result()
 
         logger.info(f"🔵 Analyzing {len(transactions)} transactions")
-
         result = self._deterministic_analysis(transactions, statement_type)
 
         try:
@@ -153,6 +152,7 @@ Be specific — mention actual amounts and merchants from the data.
             return empty
 
         logger.info(f"🔵 Running staged analysis on {len(transactions)} transactions")
+        logger.info(f"transactions sample: {json.dumps(transactions[:3], indent=2)}")
 
         # Run full deterministic analysis
         full = self._deterministic_analysis(transactions, statement_type)

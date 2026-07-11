@@ -155,3 +155,23 @@ def is_income_transaction(tx: Dict[str, Any]) -> bool:
 def is_expense_transaction(tx: Dict[str, Any]) -> bool:
     """Check if transaction is expense."""
     return get_tx_type(tx) == "expense"
+
+
+def is_fuliza_drawdown(tx: Dict[str, Any]) -> bool:
+    return bool(tx.get("fuliza_used", False))
+
+
+def is_fuliza_repayment(tx: Dict[str, Any]) -> bool:
+    return bool(tx.get("fuliza_repayment", False))
+
+
+def get_transaction_type(tx: Dict[str, Any]) -> str:
+    return tx.get("transaction_type", "")
+
+
+def get_funding_source(tx: Dict[str, Any]) -> str:
+    return tx.get("funding_source", "")
+
+
+def get_category(tx: Dict[str, Any]) -> str:
+    return tx.get("category", "")

@@ -259,6 +259,9 @@ export default function DashboardPage() {
             </div>
 
             {analysisId && <DashboardComponent analysisId={analysisId} />}
+            {!analysisId && latestAnalysisResult && (
+              <DashboardComponent analysisId={latestAnalysisResult.id} />
+            )}
 
             {/* Top counterparties for latest completed analysis */}
             <div className="mt-8">

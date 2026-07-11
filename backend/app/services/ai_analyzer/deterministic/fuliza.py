@@ -15,29 +15,48 @@ class FulizaAnalyzer:
     """Detect and analyze Fuliza cycles."""
 
     def detect_cycles(self, transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Detect Fuliza drawdown→repayment cycles."""
+        """Detect Fuliza drawdown → repayment cycles."""
+
         if not transactions:
             return self._empty_cycle()
 
         norm_txs = [normalize_transaction(tx) for tx in transactions]
 
-        fuliza_legs = [t for t in norm_txs if t.get("fuliza")]
-        repayments = [
-            t
-            for t in norm_txs
-            if "od loan repayment" in t.get("description", "").lower()
-        ]
+        # Transactions funded using Fuliza
+        drawdowns = [tx for tx in norm_txs if tx.get("fuliza_used") is True]
 
-        total_drawn = sum(get_tx_amount(t) for t in fuliza_legs)
-        total_repaid = sum(get_tx_amount(t) for t in repayments)
+        # Transactions that repay Fuliza
+        repayments = [tx for tx in norm_txs if tx.get("fuliza_repayment") is True]
+
+        logger.info(
+            "Fuliza drawdowns=%d repayments=%d",
+            len(drawdowns),
+            len(repayments),
+        )
+
+        total_drawn = sum(
+            tx.get("fuliza_amount", get_tx_amount(tx)) for tx in drawdowns
+        )
+
+        total_repaid = sum(get_tx_amount(tx) for tx in repayments)
+
         cycle_count = len(repayments)
 
         same_day_cycles = 0
-        for r in repayments:
-            r_date = r.get("date", "")
-            same_day_drawdowns = [f for f in fuliza_legs if f.get("date") == r_date]
-            if same_day_drawdowns:
+
+        for repayment in repayments:
+            repayment_date = repayment.get("date")
+
+            if any(drawdown.get("date") == repayment_date for drawdown in drawdowns):
                 same_day_cycles += 1
+
+        logger.info(
+            "Fuliza totals: drawn=%.2f repaid=%.2f cycles=%d same_day=%d",
+            total_drawn,
+            total_repaid,
+            cycle_count,
+            same_day_cycles,
+        )
 
         return {
             "total_fuliza_drawn": round(total_drawn, 2),
@@ -49,7 +68,10 @@ class FulizaAnalyzer:
             "avg_cycle_amount": (
                 round(total_drawn / cycle_count, 2) if cycle_count else 0
             ),
-            "interpretation": self._get_interpretation(same_day_cycles, cycle_count),
+            "interpretation": self._get_interpretation(
+                same_day_cycles,
+                cycle_count,
+            ),
         }
 
     def _get_interpretation(self, same_day_cycles: int, cycle_count: int) -> str:

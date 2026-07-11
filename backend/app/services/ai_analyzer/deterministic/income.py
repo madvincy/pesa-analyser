@@ -26,7 +26,7 @@ class IncomeAnalyzer:
         sources: Dict[str, List[float]] = defaultdict(list)
 
         for tx in norm_txs:
-            if tx.get("type") != "income":
+            if tx.get("direction") != "in":
                 continue
 
             amount = get_tx_amount(tx)
@@ -82,6 +82,24 @@ class IncomeAnalyzer:
             return None
 
         norm_txs = [normalize_transaction(tx) for tx in transactions]
+        logger.info("=" * 80)
+        logger.info("Income analyzer received %d transactions", len(norm_txs))
+
+        income_seen = 0
+
+        for tx in norm_txs:
+            logger.info(
+                "type=%s amount=%s description=%s",
+                tx.get("type"),
+                get_tx_amount(tx),
+                tx.get("description"),
+            )
+
+            if tx.get("direction") == "in":
+                income_seen += 1
+
+        logger.info("Income transactions found: %d", income_seen)
+        logger.info("=" * 80)
         salary_days: List[int] = []
 
         for tx in norm_txs:

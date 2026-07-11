@@ -79,6 +79,9 @@ class MetricsCalculator:
 
     def _process_transaction(self, tx: Dict[str, Any]):
         """Process a single transaction."""
+        direction = tx.get("direction")
+        transaction_type = tx.get("transaction_type")
+        funding_source = tx.get("funding_source")
         amount = get_tx_amount(tx)
         if amount == 0:
             return
@@ -107,16 +110,15 @@ class MetricsCalculator:
             self.total_expenses += fee
 
         # Process Fuliza/loan
-        if tx_type in ("fuliza_credit", "loan_disbursement"):
+        if tx.get("fuliza_used"):
+            self.fuliza_total += float(tx.get("fuliza_amount", amount))
+            self.fuliza_count += 1
             self.loan_inflows += amount
-            if tx_type == "fuliza_credit":
-                self.fuliza_total += amount
-                self.fuliza_count += 1
             self._update_highest(amount, tx.get("date", ""))
             return
 
         # Process loan repayment
-        if tx_type in ("fuliza_repayment", "loan_repayment"):
+        if transaction_type == "od_loan_repayment":
             self.loan_repayments += amount
             self._update_highest(amount, tx.get("date", ""))
             return
@@ -128,7 +130,7 @@ class MetricsCalculator:
             return
 
         # Process income/expense
-        if tx_type == "income":
+        if direction == "in":
             self.total_income += amount
             self._classify_income_source(description, amount)
             # Track top depositors
@@ -141,14 +143,26 @@ class MetricsCalculator:
         else:
             self.operating_expenses += amount
             self.total_expenses += amount + fee
+            BETTING_KEYWORDS = (
+                "betika",
+                "sportpesa",
+                "odibets",
+                "shabiki",
+                "bangbet",
+                "betway",
+                "mozzart",
+                "parimatch",
+                "1xbet",
+            )
             # Check for betting
-            if "betting" in description or any(
-                k in description
-                for k in ["sportpesa", "betika", "shabiki", "mcheza", "odibets"]
-            ):
+            if any(k in description for k in BETTING_KEYWORDS):
                 self.betting_total += amount
-            # Check for P2P
-            if "sent to" in description or "transfer to" in description:
+                # Check for P2P
+            tt = (tx.get("transaction_type") or "").lower()
+
+            if tt.startswith("customer_transfer") or tt.startswith(
+                "customer_send_money"
+            ):
                 self.p2p_total += amount
                 self.p2p_count += 1
             # Track top creditors

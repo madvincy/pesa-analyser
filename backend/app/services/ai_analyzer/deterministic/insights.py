@@ -5,8 +5,6 @@ Insights, warnings, and recommendations generation.
 import logging
 from typing import List, Dict, Any, Optional
 
-from ..models import HealthScore
-
 logger = logging.getLogger(__name__)
 
 
@@ -45,8 +43,8 @@ class InsightsGenerator:
                 recurring=recurring,
                 health_score=health_score,
             ),
-            "income_change": 0,  # Would need previous period data
-            "expenses_change": 0,  # Would need previous period data
+            "income_change": 0,
+            "expenses_change": 0,
         }
 
     def _generate_insights(
@@ -90,13 +88,23 @@ class InsightsGenerator:
                 f"At this rate, KES 10,000 lasts about {10000/burn_rate:.0f} days."
             )
 
-        # Recurring payments
+        # Recurring payments - ✅ FIXED: Safe key access
         if recurring:
             top_r = recurring[0]
+            # Try to get description from multiple possible keys
+            description = (
+                top_r.get("description")
+                or top_r.get("name")
+                or top_r.get("desc")
+                or "Unknown recurring payment"
+            )
+            avg_amount = top_r.get("average_amount", 0)
+            occurrences = top_r.get("occurrences", 0)
+
             insights.append(
-                f"Your largest recurring payment is '{top_r['description']}' "
-                f"averaging KES {top_r['average_amount']:,.0f} "
-                f"({top_r['occurrences']} times)."
+                f"Your largest recurring payment is '{description}' "
+                f"averaging KES {avg_amount:,.0f} "
+                f"({occurrences} times)."
             )
 
         # Health score
@@ -177,11 +185,14 @@ class InsightsGenerator:
                 f"Use Mpesa Ratiba or bank transfers for large amounts to save on fees."
             )
 
-        # Anomalies
+        # Anomalies - ✅ FIXED: Safe key access
         if anomalies:
+            anomaly = anomalies[0]
+            amount = anomaly.get("amount", 0)
+            date = anomaly.get("date", "")
             warnings.append(
                 f"⚠️ {len(anomalies)} unusually large transaction(s) detected. "
-                f"Largest: KES {anomalies[0]['amount']:,.0f} on {anomalies[0]['date']}."
+                f"Largest: KES {amount:,.0f} on {date}."
             )
 
         # Loan income
@@ -246,13 +257,17 @@ class InsightsGenerator:
                 f"Set a monthly budget cap and track it weekly."
             )
 
-        # Recurring payments
+        # Recurring payments - ✅ FIXED: Safe key access
         if recurring:
-            total_recurring = sum(r["total"] for r in recurring[:5])
-            recommendations.append(
-                f"You have KES {total_recurring:,.0f} in recurring payments. "
-                f"Review each one — cancel any subscriptions you no longer use."
+            total_recurring = sum(
+                r.get("total", r.get("total_amount", 0)) for r in recurring[:5]
             )
+            if total_recurring > 0:
+                count = len(recurring[:5])
+                recommendations.append(
+                    f"You have {count} recurring payment(s) totaling KES {total_recurring:,.0f}. "
+                    f"Review each one — cancel any subscriptions you no longer use."
+                )
 
         # General advice
         recommendations.append(

@@ -58,12 +58,7 @@ class TransactionParser:
         • Verification code/footer pollution
         """
 
-        logger.info("=" * 100)
-        logger.info("Starting ledger extraction")
-
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-
-        logger.info("Total non-empty lines: %d", len(lines))
 
         receipt_groups = defaultdict(list)
         ledger_rows = []
@@ -109,14 +104,6 @@ class TransactionParser:
 
             receipt, date_str, time_str, remainder = receipt_match.groups()
 
-            logger.info("=" * 80)
-            logger.info(
-                "Receipt found: %s | %s %s",
-                receipt,
-                date_str,
-                time_str,
-            )
-
             receipt_lines = []
 
             if remainder.strip():
@@ -127,7 +114,6 @@ class TransactionParser:
             while j < len(lines):
 
                 if self.receipt_pattern.match(lines[j]):
-                    logger.info("Reached next receipt.")
                     break
 
                 line = lines[j].strip()
@@ -151,8 +137,6 @@ class TransactionParser:
                 receipt_lines.append(line)
 
                 j += 1
-
-            logger.info("Receipt contains %d content lines", len(receipt_lines))
 
             description_parts = []
 
@@ -210,14 +194,6 @@ class TransactionParser:
 
                 receipt_groups[receipt].append(row)
 
-                logger.info(
-                    "Created ledger row: %s | %.2f | %.2f | %s",
-                    receipt,
-                    amount,
-                    balance,
-                    description,
-                )
-
             else:
 
                 logger.warning(
@@ -239,10 +215,6 @@ class TransactionParser:
 
             ledger_rows.extend(rows)
 
-        logger.info("=" * 100)
-        logger.info("Ledger extraction complete")
-        logger.info("Total ledger rows extracted: %d", len(ledger_rows))
-
         if ledger_rows:
 
             logger.info("First five ledger rows:")
@@ -253,8 +225,6 @@ class TransactionParser:
         else:
 
             logger.warning("NO LEDGER ROWS WERE CREATED")
-
-        logger.info("=" * 100)
 
         return ledger_rows
 

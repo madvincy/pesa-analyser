@@ -275,7 +275,6 @@ class RuleBuilder:
     @classmethod
     def build_rules(cls) -> List[TransactionRule]:
         """Build all transaction rules."""
-        logger.info("Building transaction rules registry...")
         rules = [
             # Specific rules first
             TransactionRule(
@@ -483,7 +482,6 @@ class RuleBuilder:
                 flags=TransactionFlags.CHARGE,
             ),
         ]
-        logger.info(f"Built {len(rules)} transaction rules")
         return rules
 
 
@@ -574,7 +572,6 @@ class TransactionBuilder:
             "deposit": self._extract_agent,
             "airtime": self._extract_airtime,
         }
-        logger.info("TransactionBuilder initialized")
 
     # ─── Stage 1: Leg Classification ──────────────────────────────────────────
 
@@ -598,10 +595,6 @@ class TransactionBuilder:
         ignored_legs: List[Dict[str, Any]] = []
 
         for leg in legs:
-            logger.info(f"transaction: {leg}")
-            logger.info(
-                f"Processing leg: {leg.get('receipt', 'unknown')} - {leg.get('description', '')[:50]}"
-            )
             desc = leg.get("description", "")
             receipt = leg.get("receipt", "unknown")
 
@@ -819,11 +812,6 @@ class TransactionBuilder:
                 ),
                 abs(p.amount),
             ),
-        )
-
-        logger.info(
-            f"Selected primary leg: {best.transaction_type} "
-            f"(amount={best.amount}, priority={next((r.priority.value for r in self._rules if r.name == best.transaction_type), 0)})"
         )
 
         return best
@@ -1277,8 +1265,6 @@ class TransactionBuilder:
         if not legs:
             logger.warning(f"No legs provided for receipt {receipt}")
             return None
-        logger.info(f"legs: {legs}")
-        logger.info(f"Building transaction for receipt {receipt} with {len(legs)} legs")
 
         # Sort legs once
         sorted_legs = sorted(legs, key=lambda l: (l.get("date", ""), l.get("time", "")))
@@ -1288,28 +1274,15 @@ class TransactionBuilder:
             self._classify_legs(sorted_legs)
         )
 
-        logger.info(
-            f"Receipt {receipt}: principal={len(principal_legs)}, "
-            f"charge={len(charge_legs)}, accounting={len(accounting_legs)}, "
-            f"ignored={len(ignored_legs)}"
-        )
-
         # ─── Stage 2: Select primary leg ─────────────────────────────────────
         parsed_leg = self._select_primary_leg(principal_legs)
 
         if not parsed_leg and charge_legs:
-            logger.info(
-                f"Receipt {receipt}: Only charge legs found, creating fee transaction"
-            )
             return self._create_fee_transaction(receipt, sorted_legs, charge_legs)
 
         if not parsed_leg:
             logger.warning(f"Receipt {receipt}: No primary leg found, skipping")
             return None
-
-        logger.info(
-            f"Receipt {receipt}: Primary leg selected: {parsed_leg.transaction_type} (amount={parsed_leg.amount})"
-        )
 
         # ─── Stage 3: Extract entities ──────────────────────────────────────────
         entities = self._extract_entities(parsed_leg, merchant_cache, customer_cache)
@@ -1379,12 +1352,6 @@ class TransactionBuilder:
             validation_failed=reconciliation.validation_failed,
         )
 
-        logger.info(
-            f"✅ Built transaction {receipt}: type={transaction_type}, "
-            f"direction={direction}, principal={reconciliation.principal}, "
-            f"fee={reconciliation.fee}, validation={'FAILED' if reconciliation.validation_failed else 'PASSED'}"
-        )
-
         return transaction
 
     def _create_fee_transaction(
@@ -1399,10 +1366,6 @@ class TransactionBuilder:
 
         fee_total = sum(abs(leg.get("amount", 0)) for leg in charge_legs)
         descriptions = [leg.get("description", "") for leg in charge_legs[:3]]
-
-        logger.info(
-            f"Creating fee transaction for receipt {receipt}: total_fee={fee_total}"
-        )
 
         return Transaction(
             receipt=receipt,

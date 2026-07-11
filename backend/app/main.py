@@ -35,6 +35,7 @@ from app.routers import (
     reports_router,
     payment_router,
     results_router,
+    converter_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ app.include_router(analysis_router, prefix="/api/v1", tags=["Analysis"])
 app.include_router(results_router, prefix="/api/v1/results", tags=["Results"])
 app.include_router(reports_router, prefix="/api/v1", tags=["Reports"])
 app.include_router(payment_router, prefix="/api/v1", tags=["Payment"])
+app.include_router(converter_router, prefix="/api/v1", tags=["Converter"])
 
 
 @app.get("/")

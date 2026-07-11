@@ -1,6 +1,6 @@
-// src/components/Dashboard.tsx
 "use client";
 
+import { useAnalysis } from "@/hooks/useAnalysis";
 import {
   Activity,
   AlertCircle,
@@ -13,7 +13,7 @@ import {
   TrendingUp as TrendUp,
   Wallet,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -63,71 +63,59 @@ const COLORS = [
 ];
 
 export function Dashboard({ analysisId }: DashboardProps) {
-  const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [progress, setProgress] = useState(0);
+  const { toast } = useToast();
   const [exporting, setExporting] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
-  const { toast } = useToast();
-  const wsRef = useRef<WebSocket | null>(null);
 
-  useEffect(() => {
-    fetchAnalysisData();
-    setupWebSocket();
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, [analysisId]);
-
-  const setupWebSocket = () => {
-    const wsUrl = `ws://localhost:8000/api/v1/results/ws/${analysisId}`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      if (message.status === "completed" || message.status === "failed") {
-        fetchAnalysisData();
-      }
-      if (message.progress !== undefined) {
-        setProgress(message.progress);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-    };
-  };
-
-  const fetchAnalysisData = async () => {
-    try {
-      const response = await fetch(`/api/v1/results/${analysisId}`);
-      const result = await response.json();
-      setData(result);
-      setProgress(100);
-    } catch (error) {
-      console.error("Failed to fetch analysis:", error);
+  // ─── ALL HOOKS MUST BE CALLED BEFORE ANY CONDITIONAL RETURNS ────────
+  const {
+    data,
+    loading,
+    error,
+    progress,
+    wsConnected,
+    isComplete,
+    exportPDF,
+    exportCSV,
+    emailReport,
+  } = useAnalysis(analysisId, {
+    onComplete: () => {
+      toast({
+        title: "Analysis Complete",
+        description: "Your financial analysis is ready!",
+      });
+    },
+    onError: (error) => {
       toast({
         title: "Error",
-        description: "Failed to load analysis data",
+        description: error.message || "Failed to load analysis data",
         variant: "destructive",
       });
-    } finally {
-      setLoading(false);
-    }
-  };
+    },
+    onProgress: (progress) => {
+      // Only log significant progress changes
+      if (progress % 10 === 0 || progress === 100) {
+        console.log(`📊 Progress: ${progress}%`);
+      }
+    },
+    pollInterval: 5000,
+  });
 
+  // ─── Memoize chart data (MUST be called before conditional returns) ──
+  const chartData = useMemo(
+    () => ({
+      monthlyData: data?.monthly_data || [],
+      categoryData: data?.category_data || [],
+      trendData: data?.trend_data || [],
+    }),
+    [data],
+  );
+
+  // ─── Export Handlers ──────────────────────────────────────────────────
   const handleExportPDF = async () => {
     setExporting(true);
     try {
-      const response = await fetch(
-        `/api/v1/reports/report/${analysisId}?format=pdf`,
-      );
-      if (!response.ok) throw new Error("Export failed");
-
-      const blob = await response.blob();
+      const blob = await exportPDF();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -141,10 +129,10 @@ export function Dashboard({ analysisId }: DashboardProps) {
         title: "Success",
         description: "PDF report downloaded successfully",
       });
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Export Failed",
-        description: "Failed to export PDF report",
+        description: error.message || "Failed to export PDF report",
         variant: "destructive",
       });
     } finally {
@@ -155,12 +143,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
   const handleExportCSV = async () => {
     setExporting(true);
     try {
-      const response = await fetch(
-        `/api/v1/reports/report/${analysisId}?format=csv`,
-      );
-      if (!response.ok) throw new Error("Export failed");
-
-      const blob = await response.blob();
+      const blob = await exportCSV();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -174,10 +157,10 @@ export function Dashboard({ analysisId }: DashboardProps) {
         title: "Success",
         description: "CSV data exported successfully",
       });
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Export Failed",
-        description: "Failed to export CSV data",
+        description: error.message || "Failed to export CSV data",
         variant: "destructive",
       });
     } finally {
@@ -191,22 +174,15 @@ export function Dashboard({ analysisId }: DashboardProps) {
 
     setEmailSending(true);
     try {
-      const response = await fetch("/api/v1/reports/report/email", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, analysis_id: analysisId }),
-      });
-
-      if (!response.ok) throw new Error("Failed to send email");
-
+      await emailReport(email);
       toast({
         title: "Success",
         description: `Report sent to ${email}`,
       });
-    } catch (error) {
+    } catch (error: any) {
       toast({
         title: "Email Failed",
-        description: "Failed to send report via email",
+        description: error.message || "Failed to send report via email",
         variant: "destructive",
       });
     } finally {
@@ -214,21 +190,59 @@ export function Dashboard({ analysisId }: DashboardProps) {
     }
   };
 
-  if (loading) {
+  // ─── Conditional Rendering (AFTER all hooks) ──────────────────────────
+
+  // Loading State
+  if (loading && !data) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center space-y-4">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto"></div>
-          <p className="text-muted-foreground">Analyzing your statement...</p>
+          <p className="text-muted-foreground">Loading your analysis...</p>
           <Progress value={progress} className="w-64 mx-auto" />
+          {wsConnected && (
+            <p className="text-xs text-green-500">🟢 Live updates connected</p>
+          )}
+          {!wsConnected && progress < 100 && progress > 0 && (
+            <p className="text-xs text-yellow-500">🔄 Polling for updates...</p>
+          )}
           <p className="text-xs text-muted-foreground">
-            This may take a few moments
+            {progress < 100
+              ? progress > 0
+                ? `Processing... ${progress}%`
+                : "Starting analysis..."
+              : "Finalizing results..."}
           </p>
         </div>
       </div>
     );
   }
 
+  // Error State
+  if (error && !data) {
+    return (
+      <Card>
+        <CardContent className="py-12">
+          <div className="text-center text-muted-foreground">
+            <AlertCircle className="w-12 h-12 mx-auto mb-3 text-red-500" />
+            <p className="text-red-500 font-medium">Failed to load analysis</p>
+            <p className="text-sm mt-2">
+              {error.message || "Please try again"}
+            </p>
+            <Button
+              variant="outline"
+              className="mt-4"
+              onClick={() => window.location.reload()}
+            >
+              Retry
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // No Data State
   if (!data) {
     return (
       <Card>
@@ -242,6 +256,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
     );
   }
 
+  // ─── Main Render ─────────────────────────────────────────────────────
   return (
     <div className="space-y-6">
       {/* Header with Export Buttons */}
@@ -251,18 +266,32 @@ export function Dashboard({ analysisId }: DashboardProps) {
             Financial Analysis Report
           </h2>
           <p className="text-sm text-muted-foreground">
-            {data.file_name} • Generated{" "}
-            {new Date(
-              data.completed_at || data.created_at,
-            ).toLocaleDateString()}
+            {data.file_name || "Unknown file"} • Generated{" "}
+            {data.completed_at || data.created_at
+              ? new Date(
+                  data.completed_at || data.created_at,
+                ).toLocaleDateString()
+              : "Recently"}
           </p>
+          {isComplete && (
+            <span className="text-xs text-green-500 flex items-center gap-1 mt-1">
+              <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+              Analysis complete
+            </span>
+          )}
+          {!isComplete && wsConnected && (
+            <span className="text-xs text-blue-500 flex items-center gap-1 mt-1">
+              <span className="w-2 h-2 rounded-full bg-blue-500 inline-block animate-pulse" />
+              Processing...
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
             variant="outline"
             size="sm"
             onClick={handleExportPDF}
-            disabled={exporting}
+            disabled={exporting || !isComplete}
           >
             <FileText className="h-4 w-4 mr-2" />
             {exporting ? "Exporting..." : "PDF"}
@@ -271,12 +300,16 @@ export function Dashboard({ analysisId }: DashboardProps) {
             variant="outline"
             size="sm"
             onClick={handleExportCSV}
-            disabled={exporting}
+            disabled={exporting || !isComplete}
           >
             <Download className="h-4 w-4 mr-2" />
             {exporting ? "Exporting..." : "CSV"}
           </Button>
-          <Button size="sm" onClick={handleEmailReport} disabled={emailSending}>
+          <Button
+            size="sm"
+            onClick={handleEmailReport}
+            disabled={emailSending || !isComplete}
+          >
             <Mail className="h-4 w-4 mr-2" />
             {emailSending ? "Sending..." : "Email"}
           </Button>
@@ -313,10 +346,12 @@ export function Dashboard({ analysisId }: DashboardProps) {
             <div>
               <p className="text-sm text-muted-foreground">Total Income</p>
               <p className="text-xl font-bold">
-                KES {data.totalIncome?.toLocaleString() || 0}
+                KES {data.total_income?.toLocaleString() || 0}
               </p>
               <p className="text-xs text-green-500">
-                +{data.incomeChange || 0}% from last month
+                {data.income_change !== undefined && data.income_change !== 0
+                  ? `${data.income_change > 0 ? "+" : ""}${data.income_change}% from last month`
+                  : "No change"}
               </p>
             </div>
           </CardContent>
@@ -329,10 +364,13 @@ export function Dashboard({ analysisId }: DashboardProps) {
             <div>
               <p className="text-sm text-muted-foreground">Total Expenses</p>
               <p className="text-xl font-bold">
-                KES {data.totalExpenses?.toLocaleString() || 0}
+                KES {data.total_expenses?.toLocaleString() || 0}
               </p>
               <p className="text-xs text-red-500">
-                +{data.expensesChange || 0}% from last month
+                {data.expenses_change !== undefined &&
+                data.expenses_change !== 0
+                  ? `${data.expenses_change > 0 ? "+" : ""}${data.expenses_change}% from last month`
+                  : "No change"}
               </p>
             </div>
           </CardContent>
@@ -345,9 +383,9 @@ export function Dashboard({ analysisId }: DashboardProps) {
             <div>
               <p className="text-sm text-muted-foreground">Net Cash Flow</p>
               <p
-                className={`text-xl font-bold ${data.netCashFlow >= 0 ? "text-green-500" : "text-red-500"}`}
+                className={`text-xl font-bold ${data.net_cash_flow >= 0 ? "text-green-500" : "text-red-500"}`}
               >
-                KES {data.netCashFlow?.toLocaleString() || 0}
+                KES {data.net_cash_flow?.toLocaleString() || 0}
               </p>
             </div>
           </CardContent>
@@ -360,17 +398,17 @@ export function Dashboard({ analysisId }: DashboardProps) {
             <div>
               <p className="text-sm text-muted-foreground">Avg Balance</p>
               <p className="text-xl font-bold">
-                KES {data.averageBalance?.toLocaleString() || 0}
+                KES {data.average_balance?.toLocaleString() || 0}
               </p>
               <p className="text-xs text-muted-foreground">
-                {data.totalTransactions} transactions
+                {data.total_transactions} transactions
               </p>
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Charts Section */}
+      {/* Charts Section - Using memoized data */}
       <Tabs defaultValue="overview" className="space-y-4">
         <TabsList className="flex flex-wrap gap-2">
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -391,7 +429,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
               </CardHeader>
               <CardContent className="h-[300px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={data.monthlyData || []}>
+                  <ComposedChart data={chartData.monthlyData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="month" />
                     <YAxis />
@@ -421,7 +459,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={data.categoryData || []}
+                      data={chartData.categoryData}
                       cx="50%"
                       cy="50%"
                       labelLine={false}
@@ -432,7 +470,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
                       fill="#8884d8"
                       dataKey="value"
                     >
-                      {(data.categoryData || []).map(
+                      {chartData.categoryData.map(
                         (entry: any, index: number) => (
                           <Cell
                             key={`cell-${index}`}
@@ -462,7 +500,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
               </CardHeader>
               <CardContent className="h-[300px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data.categoryData || []} layout="vertical">
+                  <BarChart data={chartData.categoryData} layout="vertical">
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis type="number" />
                     <YAxis type="category" dataKey="name" width={100} />
@@ -481,7 +519,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
                 <CardDescription>Your top spending areas</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                {(data.categoryData || [])
+                {chartData.categoryData
                   .slice(0, 5)
                   .map((category: any, index: number) => (
                     <div
@@ -504,7 +542,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
                         <span className="text-xs text-muted-foreground">
                           (
                           {(
-                            (category.value / data.totalExpenses) *
+                            (category.value / data.total_expenses) *
                             100
                           ).toFixed(1)}
                           %)
@@ -531,7 +569,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
               </CardHeader>
               <CardContent className="h-[300px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={data.trendData || []}>
+                  <LineChart data={chartData.trendData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="date" />
                     <YAxis yAxisId="left" />
@@ -566,7 +604,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
               </CardHeader>
               <CardContent className="h-[300px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data.monthlyData || []}>
+                  <BarChart data={chartData.monthlyData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="month" />
                     <YAxis />
@@ -607,29 +645,35 @@ export function Dashboard({ analysisId }: DashboardProps) {
                     data={[
                       {
                         subject: "Income",
-                        score: Math.min(100, (data.totalIncome / 150000) * 100),
+                        score: Math.min(
+                          100,
+                          ((data.total_income || 0) / 150000) * 100,
+                        ),
                       },
                       {
                         subject: "Savings",
-                        score: Math.min(100, (data.netCashFlow / 50000) * 100),
+                        score: Math.min(
+                          100,
+                          ((data.net_cash_flow || 0) / 50000) * 100,
+                        ),
                       },
                       {
                         subject: "Spending",
                         score: Math.max(
                           0,
-                          100 - (data.totalExpenses / 100000) * 100,
+                          100 - ((data.total_expenses || 0) / 100000) * 100,
                         ),
                       },
                       {
                         subject: "Stability",
                         score: Math.min(
                           100,
-                          (data.averageBalance / 50000) * 100,
+                          ((data.average_balance || 0) / 50000) * 100,
                         ),
                       },
                       {
                         subject: "Growth",
-                        score: Math.min(100, data.incomeChange + 50),
+                        score: Math.min(100, (data.income_change || 0) + 50),
                       },
                     ]}
                   />
@@ -705,7 +749,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="text-center p-3 bg-muted/50 rounded-lg">
               <p className="text-2xl font-bold">
-                {data.totalTransactions || 0}
+                {data.total_transactions || 0}
               </p>
               <p className="text-xs text-muted-foreground">
                 Total Transactions
@@ -713,7 +757,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
             </div>
             <div className="text-center p-3 bg-green-50 dark:bg-green-950/20 rounded-lg">
               <p className="text-2xl font-bold text-green-500">
-                {data.incomeCount || 0}
+                {data.income_count || 0}
               </p>
               <p className="text-xs text-muted-foreground">
                 Income Transactions
@@ -721,7 +765,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
             </div>
             <div className="text-center p-3 bg-red-50 dark:bg-red-950/20 rounded-lg">
               <p className="text-2xl font-bold text-red-500">
-                {data.expenseCount || 0}
+                {data.expense_count || 0}
               </p>
               <p className="text-xs text-muted-foreground">
                 Expense Transactions
@@ -729,7 +773,7 @@ export function Dashboard({ analysisId }: DashboardProps) {
             </div>
             <div className="text-center p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg">
               <p className="text-2xl font-bold text-blue-500">
-                KES {data.totalFees?.toLocaleString() || 0}
+                KES {data.total_fees?.toLocaleString() || 0}
               </p>
               <p className="text-xs text-muted-foreground">Total Fees</p>
             </div>
@@ -740,21 +784,21 @@ export function Dashboard({ analysisId }: DashboardProps) {
                 Highest Transaction:
               </span>
               <span className="font-medium ml-2">
-                KES {data.highestTransaction?.toLocaleString() || 0}
+                KES {data.highest_transaction?.toLocaleString() || 0}
               </span>
               <span className="text-xs text-muted-foreground ml-2">
-                {data.highestTransactionDate
-                  ? new Date(data.highestTransactionDate).toLocaleDateString()
+                {data.highest_transaction_date
+                  ? new Date(data.highest_transaction_date).toLocaleDateString()
                   : ""}
               </span>
             </div>
             <div className="text-sm">
               <span className="text-muted-foreground">Top Category:</span>
               <span className="font-medium ml-2">
-                {data.topCategory || "N/A"}
+                {data.top_category || "N/A"}
               </span>
               <span className="text-xs text-muted-foreground ml-2">
-                ({data.topCategoryPercent || 0}% of expenses)
+                ({data.top_category_percent || 0}% of expenses)
               </span>
             </div>
           </div>
