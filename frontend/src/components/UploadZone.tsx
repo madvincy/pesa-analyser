@@ -121,26 +121,6 @@ function formatDate(dateString: string): string {
   });
 }
 
-// ─── PDF Encryption Check ────────────────────────────────────────────────────
-async function isPdfEncrypted(file: File): Promise<boolean> {
-  try {
-    const { PDFDocument } = await import("pdf-lib");
-    const buffer = await file.arrayBuffer();
-    await PDFDocument.load(buffer, { ignoreEncryption: false });
-    return false;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message.toLowerCase() : "";
-    if (
-      msg.includes("encrypt") ||
-      msg.includes("password") ||
-      msg.includes("decrypt")
-    ) {
-      return true;
-    }
-    return false;
-  }
-}
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 type UploadMode = "analysis" | "conversion" | "both";
 
@@ -184,7 +164,6 @@ export function UploadZone({
   const [password, setPassword] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [isCheckingEncryption, setIsCheckingEncryption] = useState(false);
   const [passwordAttempts, setPasswordAttempts] = useState(0);
   const [conversionFormat, setConversionFormat] = useState<"csv" | "excel">(
     "csv",
@@ -266,30 +245,7 @@ export function UploadZone({
       setIsPasswordProtected(false);
       setPasswordAttempts(0);
 
-      // Check encryption for PDFs
-      const pdfFiles = validFiles.filter(
-        (f) => getFileExtension(f.name) === ".pdf",
-      );
-      if (pdfFiles.length > 0 && pdfFiles.length === validFiles.length) {
-        setIsCheckingEncryption(true);
-        try {
-          const encrypted = await isPdfEncrypted(pdfFiles[0]);
-          setIsPasswordProtected(encrypted);
-          if (encrypted) {
-            toast.warning(
-              "🔒 PDF is password protected. Enter the password below.",
-            );
-          } else {
-            toast.success(`${validFiles.length} file(s) ready.`);
-          }
-        } catch (err) {
-          console.error("Encryption check failed:", err);
-        } finally {
-          setIsCheckingEncryption(false);
-        }
-      } else {
-        toast.success(`${validFiles.length} file(s) ready.`);
-      }
+      toast.success(`${validFiles.length} file(s) ready.`);
     },
     [session, router, multiple, maxFiles],
   );
@@ -315,7 +271,6 @@ export function UploadZone({
     setIsPasswordProtected(false);
     setIsUploading(false);
     setPasswordAttempts(0);
-    setIsCheckingEncryption(false);
   };
 
   const clearAll = () => {
@@ -326,7 +281,6 @@ export function UploadZone({
     setIsPasswordProtected(false);
     setIsUploading(false);
     setPasswordAttempts(0);
-    setIsCheckingEncryption(false);
   };
 
   // ── Get token from session ───────────────────────────────────────────────
@@ -386,6 +340,14 @@ export function UploadZone({
       clearInterval(interval);
 
       if (response.status === 401) {
+        const message = data?.error ?? "Authentication required.";
+        if (/password|protected|encrypted/i.test(message)) {
+          setIsPasswordProtected(true);
+          setUploadError(message);
+          setUploadProgress(0);
+          toast.warning(message);
+          return;
+        }
         setUploadProgress(0);
         setUploadError("Authentication required. Please sign in again.");
         toast.error("Your session has expired. Please sign in again.");
@@ -400,7 +362,9 @@ export function UploadZone({
       }
 
       setUploadProgress(100);
-      toast.success(`Upload complete! ${files.length} file(s) uploaded.`);
+      toast.success(
+        data.message ?? `Upload complete! ${files.length} file(s) uploaded.`,
+      );
 
       // Store in DB
       for (const file of files) {
@@ -409,7 +373,7 @@ export function UploadZone({
           fileName: file.name,
           uploadedAt: new Date().toISOString(),
           mode: "analysis",
-          status: "completed",
+          status: data.status ?? "queued",
         });
       }
       await loadHistory();
@@ -663,7 +627,7 @@ export function UploadZone({
                   isDragActive
                     ? "border-primary bg-primary/5 scale-[1.02]"
                     : "border-muted-foreground/25 hover:border-primary/50",
-                  (isUploading || isCheckingEncryption) &&
+                  isUploading &&
                     "pointer-events-none opacity-50",
                   files.length > 0 &&
                     "border-green-500 bg-green-50/50 dark:bg-green-950/10",
@@ -811,27 +775,19 @@ export function UploadZone({
                         ))}
                       </div>
 
-                      {isCheckingEncryption && (
-                        <p className="text-sm text-muted-foreground flex items-center justify-center gap-1">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          Checking PDF security…
-                        </p>
-                      )}
-
-                      {!isCheckingEncryption && isPasswordProtected && (
+                      {isPasswordProtected && (
                         <p className="text-sm text-yellow-600 dark:text-yellow-400 flex items-center justify-center gap-1">
                           <Lock className="h-4 w-4" />
                           Password protected — enter password below
                         </p>
                       )}
 
-                      {!isCheckingEncryption &&
-                        !isPasswordProtected &&
+                      {!isPasswordProtected &&
                         files.some(
                           (f) => getFileExtension(f.name) === ".pdf",
                         ) && (
                           <p className="text-sm text-green-600 dark:text-green-400 text-center">
-                            ✅ PDFs are unlocked and ready to{" "}
+                            ✅ PDFs are ready to{" "}
                             {isConversionMode ? "convert" : "upload"}
                           </p>
                         )}
@@ -842,7 +798,7 @@ export function UploadZone({
             </Card>
 
             <AnimatePresence>
-              {files.length > 0 && !isCheckingEncryption && (
+              {files.length > 0 && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}

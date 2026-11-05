@@ -61,8 +61,9 @@ export function useAnalysisSocket(fileId: string | null) {
       } else {
         setState((prev) => ({
           ...prev,
-          status: "processing",
-          message: "Still working on it…",
+          status: data.status === "queued" ? "queued" : "processing",
+          progress: data.progress,
+          message: data.message ?? "Still working on it…",
         }));
       }
     } catch {

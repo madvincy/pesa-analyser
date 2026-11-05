@@ -9,8 +9,9 @@ const FASTAPI_URL = process.env.FASTAPI_URL ?? "http://localhost:8000";
 // model columns + whatever extra fields survive in the Redis-cached
 // analysis_result blob from ai_analyzer.py).
 interface BackendAnalysisResponse {
-  status: "pending" | "processing" | "completed" | "failed" | "unknown";
+  status: "pending" | "queued" | "processing" | "completed" | "failed" | "unknown";
   message?: string;
+  progress?: number;
   error?: string;
   id?: string;
   file_name?: string;
@@ -247,6 +248,7 @@ export async function GET(
       return NextResponse.json({
         status: data.status,
         message: data.message,
+        progress: data.progress,
         error: data.error,
         id: data.id ?? analysisId,
       });

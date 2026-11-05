@@ -9,4 +9,5 @@ data:
   ENV: "production"
   MPESA_ENVIRONMENT: "production"
   REDIS_HOST: "redis-service"
+  CORS_ORIGINS_STR: "https://pesa-analyser.com,https://www.pesa-analyser.com"
   DATABASE_URL: "postgresql://postgres:postgres@postgres-service:5432/pesa"

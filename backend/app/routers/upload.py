@@ -10,8 +10,6 @@ from fastapi import (
     File,
     HTTPException,
     Depends,
-    BackgroundTasks,
-    Request,
     WebSocket,
     WebSocketDisconnect,
     Query,
@@ -19,12 +17,14 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List, Callable, Awaitable
+import asyncio
 import os
 import io
 import re
 import uuid
 import logging
 import json
+import aiofiles
 import pdfplumber
 import PyPDF2
 from datetime import datetime
@@ -34,6 +34,7 @@ from app.services.pdf_parser import PDFParser
 from app.services.ai_analyzer import AIAnalyzer
 from app.core.cache import redis_client
 from app.core.database import get_db, SessionLocal
+from app.core.upload_security import encrypt_upload_password, decrypt_upload_password
 from app.models.analysis import Analysis
 from app.models.analysis_stages import (
     AnalysisBasicSummary,
@@ -42,6 +43,7 @@ from app.models.analysis_stages import (
     AnalysisInsights,
 )
 from app.models.user import User
+from app.tasks.analysis import process_analysis_task
 
 # Import from correct location
 from app.middleware.auth import (
@@ -68,15 +70,13 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Initialize services with the modular parser
-pdf_parser = PDFParser(debug=True)
+pdf_parser = PDFParser(debug=os.getenv("DEBUG", "false").lower() == "true")
 ai_analyzer = AIAnalyzer()
 
 # Initialize Elasticsearch service (if available)
 elasticsearch_service = None
 if ELASTICSEARCH_ENABLED:
     try:
-        import asyncio
-
         elasticsearch_service = ElasticsearchService()
         # We'll connect lazily when needed
     except Exception as e:
@@ -235,6 +235,18 @@ def _make_stage_persister(
                     if hasattr(row, key):
                         setattr(row, key, value)
 
+                analysis = db.query(Analysis).filter(Analysis.id == file_id).first()
+                if analysis:
+                    stage_progress = {
+                        "basic_summary": 55,
+                        "category_breakdown": 70,
+                        "behavior_metrics": 85,
+                        "insights": 95,
+                    }
+                    analysis.progress = max(
+                        analysis.progress or 0, stage_progress.get(stage, 45)
+                    )
+
                 if stage == "insights":
                     row.ai_enriched = (
                         "enriched"
@@ -269,23 +281,15 @@ def _make_stage_persister(
 
 
 # ─── ETA estimation ──────────────────────────────────────────────────────────
-SECONDS_PER_TRANSACTION: float = 0.05
-MIN_ESTIMATED_SECONDS: int = 5
-
-
-def estimate_processing_seconds(tx_count: int) -> int:
-    """Rough ETA shown to the frontend while analysis runs."""
-    return max(MIN_ESTIMATED_SECONDS, round(tx_count * SECONDS_PER_TRANSACTION))
-
-
 # ─── PDF encryption helper ────────────────────────────────────────────────────
 def check_pdf_encryption(
-    content: bytes,
+    source: Any,
     password: Optional[str] = None,
 ) -> str:
     """Check if PDF is encrypted and handle password."""
     try:
-        reader = PyPDF2.PdfReader(io.BytesIO(content))
+        reader_source = io.BytesIO(source) if isinstance(source, bytes) else source
+        reader = PyPDF2.PdfReader(reader_source)
     except Exception as e:
         logger.error(f"PyPDF2 could not open PDF: {e}")
         return "ok"
@@ -309,7 +313,7 @@ def check_pdf_encryption(
 
 # ─── Financial statement validation ──────────────────────────────────────────
 def validate_financial_statement(
-    content: bytes,
+    source: Any,
     filename: str,
     password: Optional[str] = None,
 ) -> bool:
@@ -320,85 +324,70 @@ def validate_financial_statement(
             logger.warning(f"❌ Invalid extension: {ext}")
             return False
 
-        text: str = ""
+        keywords: List[str] = [
+            "amount", "balance", "credit", "debit", "transaction", "mpesa",
+            "m-pesa", "bank", "account", "withdrawal", "deposit", "payment",
+            "transfer", "fee", "charge", "statement", "summary", "period",
+            "date", "opening", "closing", "total", "currency", "kes",
+            "shillings", "receipt", "reference", "code", "service", "charges",
+            "m-shwari", "fuliza", "paybill", "till", "airtime", "safaricom",
+            "mobile", "money", "sender", "receiver",
+        ]
 
+        file_source = io.BytesIO(source) if isinstance(source, bytes) else source
         if ext == ".pdf":
             try:
                 open_kwargs: Dict[str, Any] = {}
                 if password:
                     open_kwargs["password"] = password
 
-                with pdfplumber.open(io.BytesIO(content), **open_kwargs) as pdf:
+                matched_keywords = set()
+                with pdfplumber.open(file_source, **open_kwargs) as pdf:
                     for page_num, page in enumerate(pdf.pages):
+                        if page_num >= 5:
+                            break
                         page_text: Optional[str] = page.extract_text()
                         if page_text:
-                            text += page_text + "\n"
-                            logger.debug(
-                                f"   Page {page_num+1}: {len(page_text)} chars"
+                            page_lower = page_text.lower()
+                            matched_keywords.update(
+                                keyword
+                                for keyword in keywords
+                                if keyword in page_lower
                             )
                         else:
                             tables = page.extract_tables()
                             if tables:
-                                logger.debug(
-                                    f"   Page {page_num+1}: Found {len(tables)} tables"
-                                )
                                 for table in tables:
                                     for row in table:
                                         if row:
-                                            text += (
-                                                " ".join(str(c) for c in row if c)
-                                                + "\n"
+                                            row_text = " ".join(
+                                                str(cell) for cell in row if cell
                                             )
+                                            row_lower = row_text.lower()
+                                            matched_keywords.update(
+                                                keyword
+                                                for keyword in keywords
+                                                if keyword in row_lower
+                                            )
+                        if len(matched_keywords) >= 3:
+                            return True
             except Exception as e:
                 logger.warning(f"pdfplumber failed: {e}")
 
-            if len(text.strip()) < 50:
-                try:
-                    reader = PyPDF2.PdfReader(io.BytesIO(content))
-                    if reader.is_encrypted:
-                        pwd: str = password or ""
-                        decrypt_result: int = reader.decrypt(pwd)
-                        if decrypt_result == 0:
-                            logger.warning("PyPDF2 decrypt failed")
-                        else:
-                            logger.info(f"PyPDF2 decrypted (result={decrypt_result})")
-
-                    for page_num, page in enumerate(reader.pages):
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += page_text + "\n"
-                            logger.debug(
-                                f"   PyPDF2 Page {page_num+1}: {len(page_text)} chars"
-                            )
-                except Exception as e:
-                    logger.warning(f"PyPDF2 failed: {e}")
-
-            if len(text.strip()) < 50:
-                statement_indicators: List[str] = [
-                    "statement",
-                    "mpesa",
-                    "m-pesa",
-                    "bank",
-                    "kcb",
-                    "equity",
-                    "cooperative",
-                    "stanbic",
-                    "safaricom",
-                    "ncba",
-                    "absa",
-                ]
-                if any(s in filename.lower() for s in statement_indicators):
-                    return True
-                return False
+            statement_indicators = (
+                "statement", "mpesa", "m-pesa", "bank", "kcb", "equity",
+                "cooperative", "stanbic", "safaricom", "ncba", "absa",
+            )
+            return any(term in filename.lower() for term in statement_indicators)
 
         elif ext in [".csv", ".xls", ".xlsx"]:
             try:
                 import pandas as pd
 
                 df = (
-                    pd.read_csv(io.BytesIO(content))
+                    pd.read_csv(file_source, nrows=10)
                     if ext == ".csv"
-                    else pd.read_excel(io.BytesIO(content))
+                    else pd.read_excel(file_source, nrows=10)
                 )
                 text = " ".join(df.columns.astype(str))
                 sample = df.head(10).astype(str).values.flatten()
@@ -407,51 +396,8 @@ def validate_financial_statement(
                 logger.warning(f"pandas parsing failed: {e}")
                 return False
 
-        financial_keywords: List[str] = [
-            "amount",
-            "balance",
-            "credit",
-            "debit",
-            "transaction",
-            "mpesa",
-            "m-pesa",
-            "bank",
-            "account",
-            "withdrawal",
-            "deposit",
-            "payment",
-            "transfer",
-            "fee",
-            "charge",
-            "statement",
-            "summary",
-            "period",
-            "date",
-            "opening",
-            "closing",
-            "total",
-            "currency",
-            "kes",
-            "shillings",
-            "receipt",
-            "reference",
-            "code",
-            "service",
-            "charges",
-            "m-shwari",
-            "fuliza",
-            "paybill",
-            "till",
-            "airtime",
-            "safaricom",
-            "mobile",
-            "money",
-            "sender",
-            "receiver",
-        ]
-
         text_lower: str = text.lower()
-        keyword_count: int = sum(1 for kw in financial_keywords if kw in text_lower)
+        keyword_count: int = sum(1 for kw in keywords if kw in text_lower)
 
         is_financial: bool = keyword_count >= 3
         if is_financial:
@@ -524,8 +470,6 @@ def _create_empty_analysis_result(statement_type: str) -> Dict[str, Any]:
 # ─── Upload endpoint ──────────────────────────────────────────────────────────
 @router.post("/upload")
 async def upload_statement(
-    request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     password: Optional[str] = Form(None),
     db: Session = Depends(get_db),
@@ -541,42 +485,42 @@ async def upload_statement(
     if not filename:
         raise HTTPException(status_code=400, detail="File has no name.")
 
-    # ─── Debug: Log headers ──────────────────────────────────────────────────
-    logger.info("📋 Request Headers:")
-    for key, value in request.headers.items():
-        if key.lower() == "authorization":
-            logger.info(f"   Authorization: {value[:30]}...")
-        else:
-            logger.info(f"   {key}: {value}")
-
-    logger.info(f"   Filename: {filename}")
-    logger.info(f"   File size: {file.size}")
-    logger.info(f"   Content type: {file.content_type}")
-    logger.info(f"   Password provided: {bool(password)}")
-    logger.info(f"   ✅ User authenticated: {current_user.id}")
-
     user_id: uuid.UUID = current_user.id
+    file_ext: str = os.path.splitext(filename)[1].lower()
+    allowed: List[str] = [".pdf", ".csv", ".xls", ".xlsx"]
+    if file_ext not in allowed:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported format. Allowed: {', '.join(allowed)}",
+        )
+
+    file_id = str(uuid.uuid4())
+    upload_dir = os.getenv("UPLOAD_DIR", "./uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    temp_path = os.path.join(upload_dir, f"{file_id}{file_ext}")
+    max_file_size = int(os.getenv("MAX_FILE_SIZE", 50 * 1024 * 1024))
+    file_size = 0
+    queue_submitted = False
 
     try:
-        content: bytes = await file.read()
-        logger.info(f"   Bytes read: {len(content)}")
+        async with aiofiles.open(temp_path, "wb") as target:
+            while chunk := await file.read(1024 * 1024):
+                file_size += len(chunk)
+                if file_size > max_file_size:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {max_file_size // (1024 * 1024)} MB.",
+                    )
+                await target.write(chunk)
 
-        if len(content) == 0:
+        if file_size == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="File too large. Max 50 MB.")
-
-        file_ext: str = os.path.splitext(filename)[1].lower()
-        allowed: List[str] = [".pdf", ".csv", ".xls", ".xlsx"]
-        if file_ext not in allowed:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported format. Allowed: {', '.join(allowed)}",
-            )
 
         # ─── PDF Encryption Check ────────────────────────────────────────────
         if file_ext == ".pdf":
-            encryption_status: str = check_pdf_encryption(content, password)
+            encryption_status: str = await asyncio.to_thread(
+                check_pdf_encryption, temp_path, password
+            )
             logger.info(f"   Encryption status: {encryption_status}")
 
             if encryption_status == "encrypted_no_password":
@@ -591,7 +535,9 @@ async def upload_statement(
                 )
 
         # ─── Validate Financial Statement ────────────────────────────────────
-        is_financial: bool = validate_financial_statement(content, filename, password)
+        is_financial: bool = await asyncio.to_thread(
+            validate_financial_statement, temp_path, filename, password
+        )
         logger.info(f"   Is financial: {is_financial}")
 
         if not is_financial:
@@ -600,236 +546,77 @@ async def upload_statement(
                 detail="The file does not appear to be a financial statement.",
             )
 
-        # ─── Save Temp File ──────────────────────────────────────────────────
-        file_id: str = str(uuid.uuid4())
-        temp_dir: str = os.getenv("TEMP_DIR", "./temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_path: str = os.path.join(temp_dir, f"{file_id}{file_ext}")
-
-        with open(temp_path, "wb") as f:
-            f.write(content)
-        logger.info(f"   Temp file saved: {temp_path}")
-
-        # ─── Parse using Modular PDF Parser ──────────────────────────────────
-        logger.info("🔍 Parsing file with modular PDF parser...")
-        try:
-            parsed_data: Dict[str, Any]
-            if file_ext == ".pdf":
-                parsed_data = pdf_parser.parse_statement(temp_path, password)
-            elif file_ext == ".csv":
-                parsed_data = pdf_parser.parse_csv(temp_path)
-            else:
-                parsed_data = pdf_parser.parse_excel(temp_path)
-
-            logger.info("=" * 80)
-            logger.info("📊 PARSED DATA SUMMARY")
-            logger.info("=" * 80)
-
-            transactions: List[Dict[str, Any]] = parsed_data.get("transactions", [])
-            logger.info(f"   Transactions: {len(transactions)}")
-
-            raw_text: str = parsed_data.get("raw_text", "")
-            logger.info(f"   Raw text length: {len(raw_text)}")
-
-            statement_type: str = parsed_data.get("statement_type", "unknown")
-            logger.info(f"   Statement type: {statement_type}")
-
-            metadata: Dict[str, Any] = parsed_data.get("metadata", {})
-            logger.info(f"   Metadata: {metadata}")
-
-            summary: Dict[str, Any] = parsed_data.get("summary", {})
-            logger.info(f"   Summary: {summary}")
-
-            if transactions:
-                logger.info(f"   First transaction sample: {transactions[0]}")
-                logger.info(f"   Last transaction sample: {transactions[-1]}")
-            else:
-                logger.warning("⚠️ No transactions found in parsed data!")
-                if raw_text:
-                    logger.info(
-                        f"   Raw text preview (first 1500 chars):\n{raw_text[:1500]}"
-                    )
-                else:
-                    logger.error("❌ No raw text available!")
-
-            logger.info("=" * 80)
-
-        except Exception as e:
-            logger.error(f"Parse error: {e}", exc_info=True)
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise HTTPException(status_code=422, detail=f"Could not parse file: {e}")
-
-        # ─── Create Analysis Record ──────────────────────────────────────────
-        logger.info("💾 Saving analysis record to database...")
-        logger.info(f"   user_id: {user_id}")
-
         analysis = Analysis(
             id=file_id,
             user_id=user_id,
             file_name=filename,
-            file_size=len(content),
+            file_size=file_size,
             file_type=file_ext[1:],
-            statement_type=statement_type,
-            status="processing",
+            status="queued",
+            progress=0,
         )
         db.add(analysis)
         db.commit()
-        db.refresh(analysis)
-
-        logger.info(f"   ✅ Analysis record created:")
-        logger.info(f"      - ID: {file_id}")
-        logger.info(f"      - User ID: {user_id}")
-        logger.info(f"      - Status: processing")
-
-        tx_count: int = len(transactions)
-        estimated_seconds: int = estimate_processing_seconds(tx_count)
-
-        # ─── Run Analysis Synchronously for Small Files ──────────────────────
-        if tx_count <= 200:
-            logger.info(f"🔍 Processing {tx_count} transactions synchronously...")
-            try:
-                if not transactions:
-                    analysis_result = _create_empty_analysis_result(statement_type)
-                else:
-                    stage_persister = _make_stage_persister(db, file_id)
-                    analysis_result = await ai_analyzer.analyze_transactions_staged(
-                        transactions,
-                        statement_type,
-                        on_stage=stage_persister,
-                    )
-
-                # Update analysis record
-                analysis.status = "completed"
-                analysis.total_income = analysis_result.get("total_income", 0)
-                analysis.total_expenses = analysis_result.get("total_expenses", 0)
-                analysis.net_cash_flow = analysis_result.get("net_cash_flow", 0)
-                analysis.average_balance = analysis_result.get("average_balance", 0)
-                analysis.total_fees = analysis_result.get("total_fees", 0)
-                analysis.total_transactions = analysis_result.get(
-                    "total_transactions", 0
-                )
-                analysis.monthly_data = analysis_result.get("monthly_data", [])
-                analysis.category_data = analysis_result.get("category_data", [])
-                analysis.trend_data = analysis_result.get("trend_data", [])
-                analysis.insights = analysis_result.get("insights", [])
-                analysis.warnings = analysis_result.get("warnings", [])
-                analysis.recommendations = analysis_result.get("recommendations", [])
-                analysis.health_score = analysis_result.get("health_score", 0)
-                analysis.completed_at = datetime.now()
-                analysis.anonymized_analysis_data = analysis_result
-
-                db.commit()
-                db.refresh(analysis)
-
-                # Cache result
-                try:
-                    redis_client.set(
-                        f"analysis:{file_id}",
-                        json.dumps(analysis_result, default=str),
-                        expire=3600 * 24,
-                    )
-                except Exception as e:
-                    logger.warning(f"Redis set failed: {e}")
-
-                # ✅ Index to Elasticsearch (non-blocking)
-                try:
-                    logger.info(f"📤 Indexing analysis {file_id} to Elasticsearch...")
-                    await index_analysis_to_elasticsearch(
-                        file_id=file_id,
-                        user_id=str(user_id),
-                        file_name=filename,
-                        transactions=transactions,
-                        analysis_result=analysis_result,
-                    )
-                except Exception as e:
-                    logger.error(f"❌ Elasticsearch indexing error: {e}", exc_info=True)
-
-                # Clean up temp file
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-
-                # ✅ FIX: WebSocket notification is optional
-                try:
-                    await manager.send_status(
-                        file_id,
-                        {
-                            "status": "completed",
-                            "analysis": analysis_result,
-                        },
-                    )
-                except Exception as e:
-                    logger.debug(f"WS notify (sync path) failed: {e}")
-
-                return JSONResponse(
-                    {
-                        "file_id": file_id,
-                        "message": "File uploaded and analyzed successfully.",
-                        "file_name": filename,
-                        "file_size": len(content),
-                        "transaction_count": tx_count,
-                        "status": "completed",
-                        "analysis": analysis_result,
-                    }
-                )
-
-            except Exception as e:
-                logger.error(f"Synchronous analysis failed: {e}", exc_info=True)
-                # ✅ FIX: Fall back to background processing instead of failing
-                logger.info("Falling back to background processing...")
-
-        # ─── Background Processing for Large Files ───────────────────────────
-        logger.info(f"📤 Queuing background task for {tx_count} transactions...")
-
-        # ✅ FIX: WebSocket notification is optional
         try:
-            await manager.send_status(
-                file_id,
-                {
-                    "status": "queued",
-                    "message": "Analysis queued, starting shortly…",
-                    "estimated_seconds": estimated_seconds,
-                },
+            encrypted_password = (
+                encrypt_upload_password(password) if password else None
             )
-        except Exception as e:
-            logger.debug(f"WS notify (queued) failed: {e}")
+            process_analysis_task.apply_async(
+                args=(file_id, temp_path, encrypted_password),
+                task_id=file_id,
+            )
+            queue_submitted = True
+        except Exception as queue_error:
+            db.rollback()
+            failed_analysis = (
+                db.query(Analysis).filter(Analysis.id == file_id).first()
+            )
+            if failed_analysis:
+                failed_analysis.status = "failed"
+                failed_analysis.error_message = "Analysis queue is unavailable."
+                db.commit()
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            logger.error("Could not queue analysis %s: %s", file_id, queue_error)
+            raise HTTPException(
+                status_code=503,
+                detail="Analysis service is temporarily unavailable. Please try again.",
+            ) from queue_error
 
-        # Note: We don't pass `db` here - process_analysis opens its own session
-        background_tasks.add_task(process_analysis, file_id, parsed_data, temp_path)
-
-        response: Dict[str, Any] = {
-            "file_id": file_id,
-            "message": "File uploaded successfully. Analysis is running in the background.",
-            "file_name": filename,
-            "file_size": len(content),
-            "transaction_count": tx_count,
-            "status": "processing",
-            "estimated_seconds": estimated_seconds,
-        }
-
-        logger.info(f"✅ Upload complete. Response: {response}")
-        logger.info("=" * 80)
-
-        return JSONResponse(response)
+        await manager.send_status(
+            file_id,
+            {"status": "queued", "progress": 0, "message": "Analysis queued."},
+        )
+        return JSONResponse(
+            {
+                "file_id": file_id,
+                "message": "File uploaded successfully. Analysis is queued.",
+                "file_name": filename,
+                "file_size": file_size,
+                "status": "queued",
+            },
+            status_code=202,
+        )
 
     except HTTPException:
+        if os.path.exists(temp_path) and not queue_submitted:
+            os.remove(temp_path)
         raise
     except Exception as e:
         logger.error(f"Unhandled upload error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise HTTPException(status_code=500, detail="Upload could not be processed.") from e
 
 
 # ─── Background Analysis ─────────────────────────────────────────────────────
 async def process_analysis(
     file_id: str,
-    parsed_data: Dict[str, Any],
     temp_path: str,
+    encrypted_password: Optional[str] = None,
 ) -> None:
     """
-    Background task to process analysis for large files.
+    Process an uploaded statement in a worker-owned database session.
 
     Opens its OWN database session via SessionLocal() to avoid using
     the closed request-scoped session.
@@ -841,6 +628,11 @@ async def process_analysis(
     db: Session = SessionLocal()
 
     try:
+        if redis_client.client is None and not redis_client.connect():
+            logger.warning(
+                "Redis unavailable in analysis worker; continuing without cache."
+            )
+
         # ✅ FIX: WebSocket notification is optional
         try:
             await manager.send_status(
@@ -853,12 +645,6 @@ async def process_analysis(
             )
         except Exception as e:
             logger.debug(f"WS notify (processing) failed: {e}")
-
-        transactions: List[Dict[str, Any]] = parsed_data.get("transactions", [])
-        statement_type: str = parsed_data.get("statement_type", "unknown")
-        logger.info(f"   Parsed_data keys: {list(parsed_data.keys())}")
-        logger.info(f"   Transactions: {len(transactions)}")
-        logger.info(f"   Statement type: {statement_type}")
 
         analysis: Optional[Analysis] = (
             db.query(Analysis).filter(Analysis.id == file_id).first()
@@ -880,20 +666,49 @@ async def process_analysis(
 
         logger.info(f"   Analysis user_id: {analysis.user_id}")
 
+        analysis.status = "processing"
+        analysis.progress = 5
+        db.commit()
+
+        def update_parse_progress(page: int, total_pages: int) -> None:
+            if page == 1 or page == total_pages or page % 5 == 0:
+                analysis.progress = 5 + round(30 * page / max(total_pages, 1))
+                db.commit()
+
+        file_ext = os.path.splitext(temp_path)[1].lower()
+        password = (
+            decrypt_upload_password(encrypted_password)
+            if encrypted_password
+            else None
+        )
+        if file_ext == ".pdf":
+            parsed_data = pdf_parser.parse_statement(
+                temp_path, password, progress_callback=update_parse_progress
+            )
+        elif file_ext == ".csv":
+            parsed_data = pdf_parser.parse_csv(temp_path)
+        else:
+            parsed_data = pdf_parser.parse_excel(temp_path)
+
+        transactions: List[Dict[str, Any]] = parsed_data.get("transactions", [])
+        statement_type: str = parsed_data.get("statement_type", "unknown")
+        analysis.statement_type = statement_type
+        analysis.progress = 40
+        db.commit()
+
+        logger.info(
+            "Parsed %s transactions from %s (%s)",
+            len(transactions),
+            analysis.file_name,
+            statement_type,
+        )
+
         if not transactions:
-            logger.warning("⚠️ No transactions found in parsed data!")
-
-            raw_text: str = parsed_data.get("raw_text", "")
-            logger.info(f"   Raw text length: {len(raw_text)}")
-            if raw_text:
-                logger.info(f"   Raw text preview: {raw_text[:1000]}")
-
+            logger.warning("No transactions found for analysis %s", file_id)
             analysis_result = _create_empty_analysis_result(statement_type)
         else:
-            logger.info(
-                f"✅ Found {len(transactions)} transactions, running AI analyzer..."
-            )
-
+            analysis.progress = 45
+            db.commit()
             stage_persister = _make_stage_persister(db, file_id)
             analysis_result = await ai_analyzer.analyze_transactions_staged(
                 transactions,
@@ -923,6 +738,7 @@ async def process_analysis(
         analysis.health_score = analysis_result.get("health_score", 0)
         analysis.completed_at = datetime.now()
         analysis.anonymized_analysis_data = analysis_result
+        analysis.progress = 100
 
         db.commit()
         db.refresh(analysis)
@@ -937,7 +753,7 @@ async def process_analysis(
         try:
             redis_client.set(
                 f"analysis:{file_id}",
-                json.dumps(analysis_result, default=str),
+                analysis_result,
                 expire=3600 * 24,
             )
             logger.info("   Redis cache set successfully")
@@ -963,6 +779,7 @@ async def process_analysis(
                 file_id,
                 {
                     "status": "completed",
+                    "progress": 100,
                     "analysis": analysis_result,
                 },
             )
@@ -1030,15 +847,12 @@ async def get_analysis_status(
 
     if cached_result:
         try:
-            result = (
-                json.loads(cached_result)
-                if isinstance(cached_result, str)
-                else cached_result
-            )
+            result = json.loads(cached_result) if isinstance(cached_result, str) else cached_result
             logger.info("   Status: completed (from cache)")
             return JSONResponse(
                 {
                     "status": "completed",
+                    "progress": 100,
                     "analysis": result,
                     "file_name": analysis.file_name,
                     "created_at": analysis.created_at.isoformat(),
@@ -1056,6 +870,12 @@ async def get_analysis_status(
     return JSONResponse(
         {
             "status": analysis.status,
+            "progress": analysis.progress,
+            "analysis": (
+                analysis.anonymized_analysis_data
+                if analysis.status == "completed"
+                else None
+            ),
             "file_name": analysis.file_name,
             "created_at": analysis.created_at.isoformat(),
             "completed_at": (
@@ -1163,7 +983,11 @@ async def analysis_websocket(
                     result = json.loads(cached) if isinstance(cached, str) else cached
                 except Exception:
                     result = None
-            await websocket.send_json({"status": "completed", "analysis": result})
+            if result is None:
+                result = analysis.anonymized_analysis_data
+            await websocket.send_json(
+                {"status": "completed", "progress": 100, "analysis": result}
+            )
         elif analysis.status == "failed":
             await websocket.send_json(
                 {
@@ -1175,13 +999,60 @@ async def analysis_websocket(
             await websocket.send_json(
                 {
                     "status": analysis.status,
+                    "progress": analysis.progress,
                     "message": "Still processing…",
                 }
             )
 
-        # Keep connection open
+        if not analysis or analysis.status in ("completed", "failed"):
+            return
+
+        last_status = analysis.status if analysis else None
+        last_progress = analysis.progress if analysis else None
         while True:
-            await websocket.receive_text()
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=4)
+                continue
+            except asyncio.TimeoutError:
+                db.expire_all()
+                analysis = (
+                    db.query(Analysis)
+                    .filter(
+                        Analysis.id == file_id,
+                        Analysis.user_id == user.id,
+                    )
+                    .first()
+                )
+                if not analysis:
+                    await websocket.send_json({"status": "not_found"})
+                    break
+
+                if (
+                    analysis.status == last_status
+                    and analysis.progress == last_progress
+                ):
+                    continue
+
+                payload: Dict[str, Any] = {
+                    "status": analysis.status,
+                    "progress": analysis.progress,
+                }
+                if analysis.status == "completed":
+                    cached = redis_client.get(f"analysis:{file_id}")
+                    if cached:
+                        payload["analysis"] = (
+                            json.loads(cached) if isinstance(cached, str) else cached
+                        )
+                elif analysis.status == "failed":
+                    payload["error"] = analysis.error_message
+                else:
+                    payload["message"] = "Analysis is processing."
+
+                await websocket.send_json(payload)
+                last_status = analysis.status
+                last_progress = analysis.progress
+                if analysis.status in ("completed", "failed"):
+                    break
 
     except WebSocketDisconnect:
         logger.info(f"🔌 WS client disconnected: {file_id}")

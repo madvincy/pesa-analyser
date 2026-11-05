@@ -4,7 +4,7 @@ Main PDFParser class - orchestrates parsing of financial statements.
 
 import os
 import logging
-from typing import Dict, Any, Optional, List, Union, Tuple
+from typing import Callable, Dict, Any, Optional, List, Union, Tuple
 from pathlib import Path
 import pandas as pd
 from collections import defaultdict
@@ -62,7 +62,10 @@ class PDFParser:
             logging.getLogger().setLevel(logging.DEBUG)
 
     def parse_statement(
-        self, file_path: Union[str, Path, bytes], password: Optional[str] = None
+        self,
+        file_path: Union[str, Path, bytes],
+        password: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Dict[str, Any]:
         """
         Parse a financial statement file.
@@ -85,38 +88,27 @@ class PDFParser:
                 raise FileNotFoundError(f"File not found: {file_path}")
 
             ext = file_path.suffix.lower()
-            content = file_path.read_bytes()
+            content: Union[str, Path, bytes] = file_path
         else:
             content = file_path
             ext = ".pdf"  # Default
 
-        # Step 1: Extract raw text
-        raw_text, metadata = self.pdf_extractor.extract(content, password)
-
-        # Step 2: Detect statement type early
-        statement_type = self._detect_statement_type(raw_text)
-        logger.info(f"Detected statement type: {statement_type}")
-
-        # Step 3: Parse based on type
-        transactions = []
-
-        if statement_type == "mpesa":
-            # Step 3a: Extract ledger rows
-            ledger_rows = self.transaction_parser.extract_ledger_rows(raw_text)
-            logger.info(f"Extracted {len(ledger_rows)} ledger rows")
-
-            # Step 3b: Normalize receipts into transactions
-            transactions = self.transaction_parser.normalize_receipts(
-                ledger_rows, self.merchant_cache, self.customer_cache
+        if ext == ".pdf":
+            raw_text, metadata = self.pdf_extractor.extract(
+                content, password, progress_callback
             )
-            logger.info(f"Normalized into {len(transactions)} transactions")
-
-        elif statement_type == "bank":
-            transactions = self.transaction_parser.parse_bank(raw_text)
-
+            statement_type = self._detect_statement_type(raw_text)
+            transactions = self._parse_text_transactions(raw_text, statement_type)
+        elif ext == ".csv":
+            raw_text, metadata = self.csv_extractor.extract(content)
+            statement_type = self._detect_statement_type(raw_text)
+            transactions = self.csv_extractor.parse_transactions(content)
+        elif ext in (".xls", ".xlsx"):
+            raw_text, metadata = self.excel_extractor.extract(content)
+            statement_type = self._detect_statement_type(raw_text)
+            transactions = self.excel_extractor.parse_transactions(content)
         else:
-            # Generic parser for unknown types
-            transactions = self.transaction_parser.parse_generic(raw_text)
+            raise ValueError(f"Unsupported statement format: {ext}")
 
         # Step 4: Enrich transactions (add categories, etc.)
         transactions = self._enrich_transactions(transactions)
@@ -162,6 +154,21 @@ class PDFParser:
             "monthly_summary": monthly_summary,
             "merchant_summary": merchant_summary,
         }
+
+    def _parse_text_transactions(
+        self, raw_text: str, statement_type: str
+    ) -> List[Transaction]:
+        if statement_type == "mpesa":
+            ledger_rows = self.transaction_parser.extract_ledger_rows(raw_text)
+            logger.info(f"Extracted {len(ledger_rows)} ledger rows")
+            transactions = self.transaction_parser.normalize_receipts(
+                ledger_rows, self.merchant_cache, self.customer_cache
+            )
+            logger.info(f"Normalized into {len(transactions)} transactions")
+            return transactions
+        if statement_type == "bank":
+            return self.transaction_parser.parse_bank(raw_text)
+        return self.transaction_parser.parse_generic(raw_text)
 
     def parse_csv(self, file_path: Union[str, Path]) -> Dict[str, Any]:
         """Parse a CSV file."""

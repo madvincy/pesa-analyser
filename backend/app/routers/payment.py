@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from app.services.mpesa_service import MpesaService
 from app.core.database import get_db, SessionLocal
 from app.models.payment import Payment
 from app.models.analysis import Analysis
+from app.tasks.payment import poll_payment_status_task
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -40,7 +41,6 @@ class PaymentRequest(BaseModel):
 @router.post("/payment/initiate")
 async def initiate_payment(
     request: PaymentRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     """Initiate a payment for an analysis"""
@@ -83,12 +83,19 @@ async def initiate_payment(
                 payment.status = "processing"
                 db.commit()
 
-                # Start background polling
-                background_tasks.add_task(
-                    poll_payment_status,
-                    str(payment.id),
-                    result.get("CheckoutRequestID"),
-                )
+                try:
+                    poll_payment_status_task.delay(
+                        str(payment.id), result.get("CheckoutRequestID")
+                    )
+                except Exception as queue_error:
+                    payment.status = "failed"
+                    payment.error_message = "Payment status service is unavailable."
+                    db.commit()
+                    logger.error("Could not queue payment poll: %s", queue_error)
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Payment service is temporarily unavailable.",
+                    ) from queue_error
 
                 return JSONResponse({
                     "payment_id": str(payment.id),

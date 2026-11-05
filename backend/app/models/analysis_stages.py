@@ -1,16 +1,9 @@
 """
 Staged analysis tables.
 
-Each table holds ONE group of fields from the full analysis result, written
-as soon as that group is computed — cheapest/fastest first, AI-enriched
-insights last (the only step with real network latency). This lets the
-frontend render progressively via WebSocket instead of waiting for the
-entire analysis to finish before showing anything.
-
-⚠️ ASSUMPTION: the parent `Analysis` model's table is named "analyses" and
-its primary key column `id` is a String/UUID. Adjust the ForeignKey target
-and column type below if your actual model differs — I don't have the
-contents of app/models/analysis.py yet to confirm this exactly.
+Each table holds one group of fields from the analysis result, persisted as
+soon as its stage is computed. The foreign keys target the UUID primary key
+on `analyses`.
 """
 
 import uuid

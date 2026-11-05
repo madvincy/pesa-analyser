@@ -47,6 +47,7 @@ git clone https://github.com/yourusername/pesa-analyser.git
 cd pesa-analyser
 
 # 2. Set up environment variables
+cp .env.example .env
 cp frontend/.env.example frontend/.env.local
 cp backend/.env.example backend/.env
 
@@ -67,4 +68,15 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
+# Start the background worker in another backend terminal
+celery -A app.tasks:celery_app worker --loglevel=info --concurrency=2
+
 # 4. Open http://localhost:3000
+```
+
+Statement uploads are streamed to shared storage and analyzed by the Celery
+worker rather than inside the API request. For production, configure persistent
+shared storage for API and worker containers, use managed PostgreSQL/Redis or
+secure their credentials, set strong application secrets, and tune worker
+concurrency for the available memory. The Kubernetes deployment includes a
+separate worker deployment and mounts the same uploads volume.

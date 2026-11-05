@@ -29,6 +29,10 @@ spec:
           name: http
         env:
         - name: NEXT_PUBLIC_API_URL
+          value: "https://api.pesa-analyser.com/api/v1"
+        - name: NEXT_PUBLIC_WS_URL
+          value: "wss://api.pesa-analyser.com/api/v1"
+        - name: FASTAPI_URL
           value: "http://backend-service:8000"
         - name: NEXT_PUBLIC_APP_URL
           value: "https://pesa-analyser.com"

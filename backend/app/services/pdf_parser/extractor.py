@@ -5,7 +5,7 @@ File extraction modules for PDF, CSV, and Excel files.
 import io
 import re
 import logging
-from typing import Optional, List, Dict, Any, Tuple, Union, Sequence
+from typing import Callable, Optional, List, Dict, Any, Tuple, Union, Sequence
 from pathlib import Path
 import pdfplumber
 import PyPDF2
@@ -23,7 +23,10 @@ class PDFExtractor:
         self.encryption_check_pattern = re.compile(r"/Encrypt|/Encryption")
 
     def extract(
-        self, content: bytes, password: Optional[str] = None
+        self,
+        content: Union[bytes, str, Path],
+        password: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Extract text and metadata from a PDF.
@@ -31,8 +34,13 @@ class PDFExtractor:
         Returns:
             Tuple of (raw_text, metadata)
         """
-        raw_text = ""
+        raw_text_parts: List[str] = []
         metadata = {}
+        source = (
+            content
+            if isinstance(content, (str, Path))
+            else io.BytesIO(content)
+        )
 
         # Try pdfplumber first (better table extraction)
         try:
@@ -40,13 +48,14 @@ class PDFExtractor:
             if password:
                 open_kwargs["password"] = password
 
-            with pdfplumber.open(io.BytesIO(content), **open_kwargs) as pdf:
+            with pdfplumber.open(source, **open_kwargs) as pdf:
                 metadata = pdf.metadata or {}
+                page_count = len(pdf.pages)
 
                 for page_num, page in enumerate(pdf.pages):
                     page_text = page.extract_text()
                     if page_text:
-                        raw_text += page_text + "\n"
+                        raw_text_parts.append(page_text)
                     else:
                         # Try table extraction
                         tables = page.extract_tables()
@@ -58,24 +67,31 @@ class PDFExtractor:
                                         row_text = " ".join(
                                             str(c) if c is not None else "" for c in row
                                         )
-                                        raw_text += row_text + "\n"
+                                        raw_text_parts.append(row_text)
+                    if progress_callback:
+                        progress_callback(page_num + 1, page_count)
         except Exception as e:
             logger.warning(f"pdfplumber extraction failed: {e}")
 
         # Fallback to PyPDF2 if needed
+        raw_text = "\n".join(raw_text_parts)
         if len(raw_text.strip()) < 50:
+            raw_text_parts = []
             try:
-                reader = PyPDF2.PdfReader(io.BytesIO(content))
+                if isinstance(source, io.BytesIO):
+                    source.seek(0)
+                reader = PyPDF2.PdfReader(source)
                 if reader.is_encrypted and password:
                     reader.decrypt(password)
 
                 for page in reader.pages:
                     page_text = page.extract_text()
                     if page_text:
-                        raw_text += page_text + "\n"
+                        raw_text_parts.append(page_text)
             except Exception as e:
                 logger.warning(f"PyPDF2 extraction failed: {e}")
 
+        raw_text = "\n".join(raw_text_parts)
         return raw_text, metadata
 
     def extract_tables(
@@ -208,18 +224,21 @@ class PDFExtractor:
 class CSVExtractor:
     """Extract content from CSV files."""
 
-    def extract(self, content: bytes) -> Tuple[str, Dict[str, Any]]:
+    def extract(
+        self, content: Union[bytes, str, Path]
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         Extract text and metadata from CSV.
         """
         try:
-            df = pd.read_csv(io.BytesIO(content))
+            source = content if isinstance(content, (str, Path)) else io.BytesIO(content)
+            df = pd.read_csv(source, nrows=100)
             raw_text = " ".join(df.columns.astype(str))
             raw_text += " " + " ".join(df.head(100).astype(str).values.flatten())
 
             metadata = {
                 "columns": df.columns.tolist(),
-                "row_count": len(df),
+                "row_count": None,
                 "shape": df.shape,
             }
 
@@ -228,92 +247,115 @@ class CSVExtractor:
             logger.error(f"CSV extraction failed: {e}")
             return "", {}
 
-    def parse_transactions(self, content: bytes) -> List[Transaction]:
+    def parse_transactions(
+        self, content: Union[bytes, str, Path]
+    ) -> List[Transaction]:
         """
         Parse transactions from CSV.
         """
         try:
-            df = pd.read_csv(io.BytesIO(content))
             transactions = []
+            source = content if isinstance(content, (str, Path)) else io.BytesIO(content)
+            frames = (
+                pd.read_csv(source, chunksize=5000)
+                if isinstance(content, (str, Path))
+                else [pd.read_csv(source)]
+            )
 
-            # Try to identify columns
-            amount_col = None
-            date_col = None
-            desc_col = None
-
-            for col in df.columns:
-                col_lower = col.lower()
-                if any(
-                    k in col_lower
-                    for k in [
-                        "amount",
-                        "value",
-                        "credit",
-                        "debit",
-                        "withdrawal",
-                        "deposit",
-                    ]
-                ):
-                    amount_col = col
-                elif any(
-                    k in col_lower
-                    for k in ["date", "time", "transaction_date", "posting_date"]
-                ):
-                    date_col = col
-                elif any(
-                    k in col_lower
-                    for k in [
-                        "description",
-                        "details",
-                        "narration",
-                        "particulars",
-                        "memo",
-                    ]
-                ):
-                    desc_col = col
-
-            if not amount_col:
-                return []
-
-            for idx, row in df.iterrows():
-                try:
-                    amount = float(row[amount_col]) if pd.notna(row[amount_col]) else 0
-                    if amount == 0:
-                        continue
-
-                    date = ""
-                    if date_col and pd.notna(row[date_col]):
-                        date_val = row[date_col]
-                        if isinstance(date_val, pd.Timestamp):
-                            date = date_val.strftime("%Y-%m-%d")
-                        else:
-                            date = str(date_val)[:10]
-
-                    description = ""
-                    if desc_col and pd.notna(row[desc_col]):
-                        description = str(row[desc_col])
-
-                    # Generate dummy receipt for CSV transactions
-                    receipt = f"CSV_{date}_{idx}" if date else f"CSV_{idx}"
-                    direction = "in" if amount > 0 else "out"
-
-                    transactions.append(
-                        Transaction(
-                            receipt=receipt,
-                            date=date,
-                            time="00:00:00",
-                            description=description[:200],
-                            details=description[:200],
-                            direction=direction,
-                            principal=abs(amount),
-                            paid_in=amount if amount > 0 else 0.0,
-                            withdrawn=abs(amount) if amount < 0 else 0.0,
-                            transaction_type="unknown",
+            row_offset = 0
+            for df in frames:
+                amount_col = next(
+                    (
+                        col
+                        for col in df.columns
+                        if any(
+                            key in str(col).lower()
+                            for key in (
+                                "amount",
+                                "value",
+                                "credit",
+                                "debit",
+                                "withdrawal",
+                                "deposit",
+                            )
                         )
-                    )
-                except Exception as e:
-                    logger.debug(f"Error parsing CSV row: {e}")
-                    continue
+                    ),
+                    None,
+                )
+                date_col = next(
+                    (
+                        col
+                        for col in df.columns
+                        if any(
+                            key in str(col).lower()
+                            for key in ("date", "time", "transaction_date", "posting_date")
+                        )
+                    ),
+                    None,
+                )
+                desc_col = next(
+                    (
+                        col
+                        for col in df.columns
+                        if any(
+                            key in str(col).lower()
+                            for key in (
+                                "description",
+                                "details",
+                                "narration",
+                                "particulars",
+                                "memo",
+                            )
+                        )
+                    ),
+                    None,
+                )
+                if amount_col is None:
+                    return []
+
+                for row_number, (_, row) in enumerate(df.iterrows()):
+                    try:
+                        amount = (
+                            float(row[amount_col])
+                            if pd.notna(row[amount_col])
+                            else 0
+                        )
+                        if amount == 0:
+                            continue
+
+                        date = ""
+                        if date_col and pd.notna(row[date_col]):
+                            date_val = row[date_col]
+                            date = (
+                                date_val.strftime("%Y-%m-%d")
+                                if isinstance(date_val, pd.Timestamp)
+                                else str(date_val)[:10]
+                            )
+
+                        description = (
+                            str(row[desc_col])
+                            if desc_col and pd.notna(row[desc_col])
+                            else ""
+                        )
+                        row_id = row_offset + row_number
+                        receipt = f"CSV_{date}_{row_id}" if date else f"CSV_{row_id}"
+                        transactions.append(
+                            Transaction(
+                                receipt=receipt,
+                                date=date,
+                                time="00:00:00",
+                                description=description[:200],
+                                details=description[:200],
+                                direction="in" if amount > 0 else "out",
+                                principal=abs(amount),
+                                paid_in=amount if amount > 0 else 0.0,
+                                withdrawn=abs(amount) if amount < 0 else 0.0,
+                                transaction_type="unknown",
+                            )
+                        )
+                    except Exception as e:
+                        logger.debug(f"Error parsing CSV row: {e}")
+                row_offset += len(df)
 
             return transactions
         except Exception as e:
@@ -324,18 +366,21 @@ class CSVExtractor:
 class ExcelExtractor:
     """Extract content from Excel files."""
 
-    def extract(self, content: bytes) -> Tuple[str, Dict[str, Any]]:
+    def extract(
+        self, content: Union[bytes, str, Path]
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         Extract text and metadata from Excel.
         """
         try:
-            df = pd.read_excel(io.BytesIO(content))
+            source = content if isinstance(content, (str, Path)) else io.BytesIO(content)
+            df = pd.read_excel(source, nrows=100)
             raw_text = " ".join(df.columns.astype(str))
             raw_text += " " + " ".join(df.head(100).astype(str).values.flatten())
 
             metadata = {
                 "columns": df.columns.tolist(),
-                "row_count": len(df),
+                "row_count": None,
                 "shape": df.shape,
             }
 
@@ -344,12 +389,18 @@ class ExcelExtractor:
             logger.error(f"Excel extraction failed: {e}")
             return "", {}
 
-    def parse_transactions(self, content: bytes) -> List[Transaction]:
+    def parse_transactions(
+        self, content: Union[bytes, str, Path]
+    ) -> List[Transaction]:
         """
         Parse transactions from Excel.
         """
+        if isinstance(content, (str, Path)) and Path(content).suffix.lower() == ".xlsx":
+            return self._parse_xlsx_stream(content)
+
         try:
-            df = pd.read_excel(io.BytesIO(content))
+            source = content if isinstance(content, (str, Path)) else io.BytesIO(content)
+            df = pd.read_excel(source)
             transactions = []
 
             # Try to identify columns
@@ -435,3 +486,89 @@ class ExcelExtractor:
         except Exception as e:
             logger.error(f"Excel transaction parsing failed: {e}")
             return []
+
+    def _parse_xlsx_stream(self, file_path: Union[str, Path]) -> List[Transaction]:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            rows = workbook.active.iter_rows(values_only=True)
+            headers = next(rows, None)
+            if not headers:
+                return []
+
+            def column_index(keywords: Sequence[str]) -> Optional[int]:
+                return next(
+                    (
+                        index
+                        for index, value in enumerate(headers)
+                        if any(
+                            keyword in str(value or "").lower()
+                            for keyword in keywords
+                        )
+                    ),
+                    None,
+                )
+
+            amount_col = column_index(
+                ("amount", "value", "credit", "debit", "withdrawal", "deposit")
+            )
+            date_col = column_index(
+                ("date", "time", "transaction_date", "posting_date")
+            )
+            desc_col = column_index(
+                ("description", "details", "narration", "particulars", "memo")
+            )
+            if amount_col is None:
+                return []
+
+            transactions = []
+            for row_number, row in enumerate(rows):
+                try:
+                    value = row[amount_col] if amount_col < len(row) else None
+                    amount = float(value) if value is not None else 0
+                    if amount == 0:
+                        continue
+
+                    date_value = (
+                        row[date_col]
+                        if date_col is not None and date_col < len(row)
+                        else None
+                    )
+                    date = (
+                        date_value.strftime("%Y-%m-%d")
+                        if hasattr(date_value, "strftime")
+                        else str(date_value)[:10]
+                        if date_value is not None
+                        else ""
+                    )
+                    description_value = (
+                        row[desc_col]
+                        if desc_col is not None and desc_col < len(row)
+                        else None
+                    )
+                    description = str(description_value or "")
+                    receipt = (
+                        f"XLS_{date}_{row_number}"
+                        if date
+                        else f"XLS_{row_number}"
+                    )
+                    transactions.append(
+                        Transaction(
+                            receipt=receipt,
+                            date=date,
+                            time="00:00:00",
+                            description=description[:200],
+                            details=description[:200],
+                            direction="in" if amount > 0 else "out",
+                            principal=abs(amount),
+                            paid_in=amount if amount > 0 else 0.0,
+                            withdrawn=abs(amount) if amount < 0 else 0.0,
+                            transaction_type="unknown",
+                        )
+                    )
+                except (TypeError, ValueError, IndexError) as e:
+                    logger.debug("Error parsing Excel row %s: %s", row_number, e)
+            return transactions
+        finally:
+            workbook.close()

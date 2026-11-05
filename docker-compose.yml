@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ─── Frontend Service ──────────────────────────────────────────────────────
   frontend:
@@ -10,8 +8,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://backend:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
       - NEXT_PUBLIC_APP_URL=http://localhost:3000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/api/v1
+      - FASTAPI_URL=http://backend:8000
     depends_on:
       - backend
     networks:
@@ -24,12 +24,18 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: pesa-backend
+    env_file:
+      - ./backend/.env
     ports:
       - "8000:8000"
     environment:
       - ENV=production
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/pesa
+      - DATABASE_URL=${DATABASE_URL:?Set DATABASE_URL in the root .env file}
       - REDIS_HOST=redis
+      - UPLOAD_DIR=/app/uploads
+      - MAX_FILE_SIZE=52428800
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       # Elasticsearch
       - ELASTICSEARCH_HOST=elasticsearch
       - ELASTICSEARCH_PORT=9200
@@ -41,9 +47,12 @@ services:
       - ./backend/reports:/app/reports
       - ./backend/logs:/app/logs
     depends_on:
-      - postgres
-      - redis
-      - elasticsearch
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     networks:
       - pesa-network
     restart: unless-stopped
@@ -54,7 +63,7 @@ services:
     container_name: pesa-postgres
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env file}
       - POSTGRES_DB=pesa
     ports:
       - "5432:5432"
@@ -63,6 +72,11 @@ services:
     networks:
       - pesa-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pesa"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ─── Redis Cache ──────────────────────────────────────────────────────────
   redis:
@@ -75,6 +89,11 @@ services:
     networks:
       - pesa-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ─── Elasticsearch ────────────────────────────────────────────────────────
   elasticsearch:
@@ -120,21 +139,27 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: pesa-celery-worker
-    command: celery -A app.tasks worker --loglevel=info --concurrency=4
+    command: celery -A app.tasks:celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+    env_file:
+      - ./backend/.env
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/pesa
+      - DATABASE_URL=${DATABASE_URL:?Set DATABASE_URL in the root .env file}
       - REDIS_HOST=redis
+      - UPLOAD_DIR=/app/uploads
+      - MAX_FILE_SIZE=52428800
       - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - ELASTICSEARCH_URL=http://elasticsearch:9200
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/reports:/app/reports
     depends_on:
-      - backend
-      - redis
-      - postgres
-      - elasticsearch
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     networks:
       - pesa-network
     restart: unless-stopped
@@ -145,12 +170,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: pesa-celery-beat
-    command: celery -A app.tasks beat --loglevel=info
+    command: celery -A app.tasks:celery_app beat --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/pesa
+      - DATABASE_URL=${DATABASE_URL:?Set DATABASE_URL in the root .env file}
       - REDIS_HOST=redis
       - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
     depends_on:
       - backend
       - redis

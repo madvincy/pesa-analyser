@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+  namespace: pesa-analyser
+  labels:
+    app: celery-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: celery-worker
+  template:
+    metadata:
+      labels:
+        app: celery-worker
+    spec:
+      containers:
+        - name: celery-worker
+          image: pesaregistry.azurecr.io/pesa-backend:latest
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - app.tasks:celery_app
+            - worker
+            - --loglevel=info
+            - --concurrency=1
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pesa-config
+                  key: DATABASE_URL
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: pesa-config
+                  key: REDIS_HOST
+            - name: UPLOAD_DIR
+              value: /app/uploads
+            - name: CELERY_BROKER_URL
+              value: redis://redis-service:6379/0
+            - name: CELERY_RESULT_BACKEND
+              value: redis://redis-service:6379/1
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pesa-secrets
+                  key: GEMINI_API_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pesa-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pesa-secrets
+                  key: OPENAI_API_KEY
+            - name: UPLOAD_PASSWORD_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pesa-secrets
+                  key: UPLOAD_PASSWORD_ENCRYPTION_KEY
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+            - name: reports
+              mountPath: /app/reports
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads-pvc
+        - name: reports
+          persistentVolumeClaim:
+            claimName: reports-pvc

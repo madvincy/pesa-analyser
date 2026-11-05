@@ -33,7 +33,7 @@ def upgrade() -> None:
     op.create_table(
         "analysis_basic_summary",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("analysis_id", sa.String(), nullable=False),
+        sa.Column("analysis_id", postgresql.UUID(as_uuid=False), nullable=False),
         sa.Column("total_income", sa.Float(), nullable=True),
         sa.Column("total_expenses", sa.Float(), nullable=True),
         sa.Column("net_cash_flow", sa.Float(), nullable=True),
@@ -70,7 +70,7 @@ def upgrade() -> None:
     op.create_table(
         "analysis_behavior_metrics",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("analysis_id", sa.String(), nullable=False),
+        sa.Column("analysis_id", postgresql.UUID(as_uuid=False), nullable=False),
         sa.Column("health_score", sa.Integer(), nullable=True),
         sa.Column(
             "health_breakdown", postgresql.JSON(astext_type=sa.Text()), nullable=True
@@ -107,7 +107,7 @@ def upgrade() -> None:
     op.create_table(
         "analysis_category_breakdown",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("analysis_id", sa.String(), nullable=False),
+        sa.Column("analysis_id", postgresql.UUID(as_uuid=False), nullable=False),
         sa.Column(
             "category_data", postgresql.JSON(astext_type=sa.Text()), nullable=True
         ),
@@ -144,7 +144,7 @@ def upgrade() -> None:
     op.create_table(
         "analysis_insights",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("analysis_id", sa.String(), nullable=False),
+        sa.Column("analysis_id", postgresql.UUID(as_uuid=False), nullable=False),
         sa.Column("insights", postgresql.JSON(astext_type=sa.Text()), nullable=True),
         sa.Column("warnings", postgresql.JSON(astext_type=sa.Text()), nullable=True),
         sa.Column(
