@@ -158,11 +158,13 @@ async def _resolve_user_from_token(token: str, db: Session) -> Optional[User]:
     user_id_claim = payload.get("user_id")
     if user_id_claim:
         try:
-            user = db.query(User).filter(User.id == user_id_claim).first()
+            parsed_user_id = uuid.UUID(str(user_id_claim))
+        except (ValueError, TypeError, AttributeError):
+            parsed_user_id = None
+        if parsed_user_id:
+            user = db.query(User).filter(User.id == parsed_user_id).first()
             if user:
                 return user
-        except Exception:
-            pass
 
     email = payload.get("email") or payload.get("sub")
     name = payload.get("name")

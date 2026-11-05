@@ -48,31 +48,25 @@ cd pesa-analyser
 
 # 2. Set up environment variables
 cp .env.example .env
-cp frontend/.env.example frontend/.env.local
+cp frontend/.env.example frontend/.env
 cp backend/.env.example backend/.env
 
-# 3. Start with Docker Compose
-docker-compose up -d
+# Generate a secret and set NEXTAUTH_SECRET in the root .env file:
+openssl rand -base64 48
+# Add Google OAuth credentials to frontend/.env if you want Google sign-in.
 
-# Or run separately:
-
-# Frontend
-cd frontend
-npm install
-npm run dev
-
-# Backend
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-
-# Start the background worker in another backend terminal
-celery -A app.tasks:celery_app worker --loglevel=info --concurrency=2
-
-# 4. Open http://localhost:3000
+# 3. Start the complete application
+docker compose up --build
 ```
+
+Open the frontend at http://localhost:3000. The API is at
+http://localhost:8000, PostgreSQL is available to desktop pgAdmin on port 15432
+(the host port can be changed with `POSTGRES_PORT`),
+and Kibana is at http://localhost:5601. This Compose file starts the frontend,
+API, PostgreSQL, Redis, Elasticsearch, Kibana, Celery worker, and Celery beat
+services. Frontend Prisma/NextAuth tables are kept in the PostgreSQL `nextauth`
+schema, separate from the backend's tables in `public`; Compose creates the
+schema automatically without dropping existing database tables.
 
 Statement uploads are streamed to shared storage and analyzed by the Celery
 worker rather than inside the API request. For production, configure persistent
